@@ -1,0 +1,19 @@
+# NOTICE & Third-Party Attributions
+
+This product includes third-party software. Maintain this file per 开发执行方案 铁律 8(依赖 ADR 必须同步更新本文件与 07 审计表)。
+
+| Component | License | Use |
+|---|---|---|
+| [rclone](https://rclone.org) | MIT | External engine binary (downloaded at runtime, not distributed in-repo) |
+| [shadcn/ui](https://ui.shadcn.com) + [Radix/Base UI primitives](https://www.radix-ui.com) | MIT | Copied UI components under `app/` |
+| [TanStack Table / Virtual](https://tanstack.com) | MIT | File list treegrid |
+| [cmdk](https://cmdk.pw) | MIT | Command palette |
+| [react-hook-form](https://react-hook-form.com) / [zod](https://zod.dev) | MIT | Forms |
+| [Tauri](https://tauri.app) / [specta](https://github.com/specta-rs/specta) | MIT/Apache-2.0 | Desktop shell / IPC types |
+| [blake3](https://github.com/BLAKE3-team/BLAKE3) | CC0/Apache-2.0 | Content hashing |
+| Partiverse core files `crates/partiverse-core/src/{caps,error}.rs` | Apache-2.0 | **Adapted from [PartiSync](https://github.com/Partiverse/partisync)** (Copyright PartiSync contributors) — provenance header required in file |
+| Forked Go backends (`backends-go/`, planned M1+) | Apache-2.0 / upstream rclone fork terms | Baidu/123 open-platform backends |
+
+Placeholder brand assets under `assets/brand/` are **PLACEHOLDERs** (see REPLACE-BEFORE-RELEASE.md) — not licensed for any use beyond development.
+
+Partiverse itself is licensed AGPL-3.0 (see LICENSE); proprietary `partiverse-pro` components (planned, ✅D36) are licensed separately and are NOT part of this repository.

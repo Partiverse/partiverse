@@ -1,0 +1,30 @@
+# Build / dev artifacts
+/target/
+node_modules/
+dist/
+build/
+coverage/
+*.local
+
+# Env & secrets (never commit — AGENTS red line)
+.env
+.env.*
+*.key
+*.pem
+secrets/
+credentials*
+
+# Engine binaries (downloaded at runtime, never vendored)
+/engine/bin/
+*.exe
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Local untracked config (test accounts etc. — D34)
+config/local.*
+*.local.toml

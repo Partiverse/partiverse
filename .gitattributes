@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.png binary
+*.icns binary
+*.ico binary
+*.svg text
+docs/screenshots/** binary
