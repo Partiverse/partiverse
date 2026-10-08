@@ -1,0 +1,12 @@
+# partiverse-engine:rclone rcd 引擎协调器。
+# 占位空壳:由 WP02(引擎协调器)落地,当前不含任何实现。
+[package]
+name = "partiverse-engine"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0"
+# 应用内部 crate,不发布到 registry(deny.toml [licenses] private 豁免依赖此标记)。
+publish = false
+
+[dependencies]
+# 零依赖基线(M1);新依赖需 ADR(AGENTS.md 铁律 8)。

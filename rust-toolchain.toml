@@ -1,0 +1,6 @@
+# 工具链钉版(M1-WP01-T01;cargo 1.99.0)。
+# 修改本文件需 ADR(AGENTS.md 作业红线)。
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
