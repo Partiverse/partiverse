@@ -6,7 +6,9 @@
 //! 基线 commit:`d7f73ffd516ae455e9774f635332453bede6cfc1`(拷贝前已核对参考副本 HEAD 一致)。
 //! 依据:docs/reviews/M1-partisync复用评估.md(桌面壳方案 b 的 V1 代码复用例外;§2 裁定表
 //! 「partisync-core 的 caps.rs+error.rs ✅ V1 拷贝引入」;拷贝优于 git 依赖:M1 零依赖、隔离上游 0.x 漂移)。
-//! 本仓改动:仅追加本标注头以适配 partiverse-core 模块归属,原文件内容逐行未动。
+//! 本仓改动:仅追加本标注头以适配 partiverse-core 模块归属,原文件内容逐行未动;
+//! M1-WP03-T01 于文件末尾追加品牌别名 `pub type PartiverseError = PartisyError;`
+//! (追加段,上游原文段仍逐字节一致,见 docs/adr/0003-partisync-core-copy.md 修订节)。
 
 //! 错误分类学（SPEC M0-WP01）：作业恢复语义的三分类。
 //!
@@ -106,3 +108,9 @@ impl std::error::Error for PartisyError {
         self.source.as_ref().map(|b| &**b as _)
     }
 }
+
+// —— 本仓改动追加段(上游原文段到此为止,ADR-0003 修订节)——
+/// 品牌别名(ADR-0003 影响条「WP03 排期清理」的最保守落地,本卡只别名不改名):
+/// 供本仓代码与公共 API 以 Partiverse 品牌名引用拷贝件错误类型;上游原文段
+/// (标注头之后至此行前)逐字节零改动,拷贝件本体不再触碰。
+pub type PartiverseError = PartisyError;
