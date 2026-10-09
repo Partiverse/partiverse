@@ -1,0 +1,30 @@
+# cargo-deny 基线(M1-WP01-T01;按本机 cargo-deny 0.20.2 官方文档核对字段)。
+# 修改白名单/阈值需 ADR(AGENTS.md 作业红线)。
+
+[licenses]
+# 未发布(publish = false)的自有 workspace 成员豁免 license 检查(官方 private 机制,
+# 见 cargo-deny 0.20.x 文档 licenses/cfg.md);第三方依赖仅按下表白名单放行,未列出即拒绝。
+private = { ignore = true }
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CDLA-Permissive-2.0",
+    "Zlib",
+]
+
+[bans]
+# 同名多版本依赖直接拒绝(当前零依赖恒绿,引入依赖后即刻生效)。
+multiple-versions = "deny"
+# 禁止通配符(*)版本约束。
+wildcards = "deny"
+
+[sources]
+# 禁止未知来源:registry 白名单仅 crates.io,git 来源默认全拒(需 ADR 逐个放行)。
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

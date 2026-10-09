@@ -1,0 +1,9 @@
+# Partiverse 工作区根清单(M1-WP01-T01 骨架;零第三方依赖基线)。
+[workspace]
+resolver = "2"
+members = [
+    "crates/partiverse-core",
+    "crates/partiverse-engine",
+    "crates/partiverse-mount",
+    "xtask",
+]

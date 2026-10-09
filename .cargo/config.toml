@@ -1,0 +1,3 @@
+# cargo 别名:xtask 统一入口(cargo xtask <命令>)。
+[alias]
+xtask = "run -p xtask --"
