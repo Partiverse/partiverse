@@ -8,4 +8,15 @@ license = "AGPL-3.0"
 publish = false
 
 [dependencies]
+# job 落库(M1-WP03-T02,ADR-0006):bundled 免系统库耦合;default-features=false
+# 裁 cache 与 ffi-sqlite-wasm-rs(后者 wasm 链触发 deny multiple-versions)。
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
+# rc 载荷参数面(ADR-0006;与 engine 同版本单源)。
+serde_json = "1.0.151"
+
+[dev-dependencies]
+# T01 RcClient 接缝仅测试消费(Cargo 禁止普通依赖成环:partiverse-engine 已依赖
+# 本 crate);生产消费面 = jobs::RcDispatch trait,由引擎/应用层适配(ADR-0006);
+# 显式 version 避免 deny wildcards=deny 误伤(ADR-0004 同款)。
+partiverse-engine = { path = "../partiverse-engine", version = "0.1.0" }
 # 零依赖基线(M1);新依赖需 ADR(AGENTS.md 铁律 8)。
