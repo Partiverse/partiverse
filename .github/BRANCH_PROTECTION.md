@@ -1,6 +1,7 @@
 # 分支保护配置说明(main)
 
-> 状态:配置契约。GitHub 侧配置由 Owner 执行(D35 远端未建);本文件由 M1-WP01-T03 落档,规定保护口径。
+> 状态:配置契约。GitHub 侧配置由 Owner 执行完毕(D35);本文件由 M1-WP01-T03 落档,
+> M1-WP01-T06 已按 Owner 2026-10-09 实际生效配置逐一核对同步(证据:`gh api repos/Partiverse/partiverse/branches/main/protection`)。
 
 ## 保护目标
 
@@ -20,22 +21,23 @@
 2. ✅ **Require status checks to pass before merging** → 搜索并选中 `gates (linux)`;
    同时勾选 **Require branches to be up to date before merging**(防合并后门禁漂移)。
 3. ✅ **Do not allow force pushes**;✅ **Do not allow deletions**。
-4. 建议:✅ Require conversation resolution before merging。
-5. 建议勾选 **Include administrators**,Owner 直推同样受门禁约束(与铁律 5 一致);其余项 Owner 裁量。
+4. Require conversation resolution before merging:❌ 未勾选(实测 `required_conversation_resolution=false`,
+   与远端实际一致;是否启用由 Owner 另行裁量,不作为本契约必需项)。
+5. **Include administrators 不勾选(即 `enforce_admins=false`)**——偏离理由见下方注记;其余项 Owner 裁量。
 
 > 注:GitHub UI 的状态检查下拉框需该 check 至少出现过一次才可选;首个 PR 触发 CI run 后再保存本规则,
 > 或直接用下方 REST 载荷按名写入。
 
-## REST 等效配置(gh CLI,D35 建远端后执行)
+## REST 等效配置(gh CLI;2026-10-09 已按此口径生效,重放本载荷 = 现网配置)
 
 ```bash
 gh api repos/Partiverse/partiverse/branches/main/protection -X PUT --input - <<'EOF'
 {
   "required_status_checks": { "strict": true, "contexts": ["gates (linux)"] },
-  "enforce_admins": true,
+  "enforce_admins": false,
   "required_pull_request_reviews": {
     "required_approving_review_count": 1,
-    "dismiss_stale_reviews": true
+    "dismiss_stale_reviews": false
   },
   "restrictions": null,
   "allow_force_pushes": false,
@@ -44,5 +46,12 @@ gh api repos/Partiverse/partiverse/branches/main/protection -X PUT --input - <<'
 EOF
 ```
 
-> 仓库 slug 按组织惯例假定为 `Partiverse/partiverse`(姊妹仓库 `Partiverse/partisync`);
-> D35 定名后如不同请替换。
+> **enforce_admins=false 偏离注记(Owner 裁量 2026-10-09)**:本仓库当前为单账号(Partiverse 唯一提交者),
+> 若 `enforce_admins=true`,Owner 自开 PR 无人可批准(required approvals=1),保护规则将封锁一切合入(自批死锁)。
+> 该项属文档建议项、非 CI 门禁(必需检查不受影响),故按实际配置关闭;待出现第二维护者后重评开启。
+>
+> 2026-10-09 逐一核对结果(M1-WP01-T06,`gh api` 实测远端):strict=true ✓、contexts=`["gates (linux)"]` ✓、
+> required approvals=1 ✓、enforce_admins=false ✓(偏离如上)、dismiss_stale_reviews=false(文档原载 true,已同步实际)、
+> conversation resolution=false(见上第 4 条)、force pushes 禁止 ✓、deletions 禁止 ✓。
+>
+> 仓库 slug 已核实为 `Partiverse/partiverse`(origin 实测;姊妹仓库 `Partiverse/partisync`)。
