@@ -153,7 +153,7 @@ impl EngineManifest {
 }
 
 /// 路径组件安全判定:非空且仅限 `[A-Za-z0-9._+-]`(隐式拒绝分隔符与遍历形)。
-fn is_safe_path_component(text: &str) -> bool {
+pub(crate) fn is_safe_path_component(text: &str) -> bool {
     !text.is_empty()
         && text != "."
         && text != ".."

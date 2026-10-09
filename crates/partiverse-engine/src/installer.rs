@@ -367,7 +367,7 @@ fn sha256_file(path: &Path) -> Result<[u8; 32], EngineError> {
 /// linux=XDG_DATA_HOME(仅绝对路径,XDG 规范)→ $HOME/.local/share;
 /// macOS=~/Library/Application Support;windows=%LOCALAPPDATA%(引擎二进制为
 /// 设备本地资产,刻意不用 Roaming,避免大文件随漫游配置复制)。
-fn platform_data_dir() -> Option<PathBuf> {
+pub(crate) fn platform_data_dir() -> Option<PathBuf> {
     fn env_dir(key: &str) -> Option<PathBuf> {
         std::env::var_os(key)
             .filter(|value| !value.is_empty())
@@ -647,6 +647,11 @@ mod tests {
     #[test]
     fn resolve_install_root_prefers_env_then_platform_data_dir() {
         // 任务卡 ⑤:env 覆盖 > 平台数据目录(XDG/Win/mac 已知目录)。
+        // 持 slots::test_env_lock(T03):本测试写 PARTIVERSE_ENGINE_ROOT,与
+        // 同一二进制内读 env 的槽位级联测试互斥,防 setenv/getenv 并发竞态。
+        let _guard = crate::slots::test_env_lock::ENV_LOCK
+            .lock()
+            .expect("env lock");
         let override_root = temp_dir("root-env");
         // SAFETY:测试进程内单线程读写该变量;其余测试不读 PARTIVERSE_ENGINE_ROOT。
         unsafe {

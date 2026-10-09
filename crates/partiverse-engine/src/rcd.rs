@@ -139,36 +139,13 @@ impl RcdLaunch {
     /// 执行一次 `rclone rc <method>`(同一 socket + env 认证,argv 零凭据);
     /// 成功返回 stdout 文本,非零退出 → Retryable(stderr/stdout 首行截断入载荷)。
     fn run_rc(&self, method: &str) -> Result<String, EngineError> {
-        let output = Command::new(&self.binary)
-            .arg("rc")
-            .arg("--unix-socket")
-            .arg(&self.socket_path)
-            .env(AUTH_USER_ENV, &self.user)
-            .env(AUTH_PASS_ENV, &self.pass)
-            .arg(method)
-            .output()
-            .map_err(|err| {
-                EngineError::new(
-                    EngineErrorKind::RcdNotReady(format!("rc probe spawn failed: {err}")),
-                    Severity::Retryable,
-                )
-            })?;
-        if output.status.success() {
-            return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
-        }
-        // rclone rc 把错误 JSON 打到 stdout、NOTICE 打到 stderr:都带上,截断防刷屏。
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let detail = first_line(&stderr)
-            .or_else(|| first_line(&stdout))
-            .unwrap_or_else(|| "no diagnostic output".into());
-        Err(EngineError::new(
-            EngineErrorKind::RcdNotReady(format!(
-                "rc {method} failed ({}): {detail}",
-                output.status
-            )),
-            Severity::Retryable,
-        ))
+        run_rc_method(
+            &self.binary,
+            &self.socket_path,
+            &self.user,
+            &self.pass,
+            method,
+        )
     }
 
     /// 失败路径收尾:杀进程(SIGKILL)+ 收尸 + 清 socket(NotFound 属正常)。
@@ -211,6 +188,8 @@ pub struct RcdSupervisor {
     binary: PathBuf,
     /// 期望版本(manifest 锁定版本的 rclone 上报形态,如 "v1.75.1")。
     expected_version: String,
+    /// 槽位 cache-dir(T03:崩溃重启按同一路径重注入 `--cache-dir`,Q5)。
+    cache_dir: PathBuf,
     /// 本次实例的 unix socket 路径(临时目录下随机名;重启即换新名)。
     socket_path: PathBuf,
     /// 随机认证用户(CSPRNG hex;Debug 脱敏)。
@@ -228,6 +207,7 @@ impl fmt::Debug for RcdSupervisor {
         f.debug_struct("RcdSupervisor")
             .field("binary", &self.binary)
             .field("expected_version", &self.expected_version)
+            .field("cache_dir", &self.cache_dir)
             .field("socket_path", &self.socket_path)
             .field("user", &"<redacted>")
             .field("pass", &"<redacted>")
@@ -239,23 +219,45 @@ impl fmt::Debug for RcdSupervisor {
 
 impl RcdSupervisor {
     /// 拉起 rcd 并阻塞至就绪探活通过(卡内 ①②):unix socket(临时目录随机名)
-    /// 与随机凭据(env 传递)、最小参数集;就绪窗口超时或版本断言失败 → 收尾
-    /// (杀进程+清 socket)后错误上浮,不留孤儿进程。
-    pub fn spawn(binary: &Path) -> Result<Self, EngineError> {
+    /// 与随机凭据(env 传递)、最小参数集;`cache_dir` 注入 `--cache-dir`
+    /// (T03 槽位参数化,rclone 1.75.1 全局 flag,`help flags`+rcd 烟测实测);
+    /// 就绪窗口超时或版本断言失败 → 收尾(杀进程+清 socket)后错误上浮,不留
+    /// 孤儿进程。
+    pub fn spawn(binary: &Path, cache_dir: &Path) -> Result<Self, EngineError> {
         // 版本断言基准 = 随仓 manifest 锁定版本(rclone 上报形态带 "v" 前缀,
         // 本机 core/version 实测核实)。manifest 非法 → Fatal 原样上浮。
         let expected_version = format!("v{}", EngineManifest::embedded()?.version);
-        let mut launched = launch_and_probe(binary, &expected_version)?;
+        let mut launched = launch_and_probe(binary, cache_dir, &expected_version)?;
         // RcdLaunch 实现 Drop(泄漏保险),不可整体搬移:mem::take 逐字段提取,
         // 提取后的空壳 Drop 无害(child=None → 跳过收尸;空路径 → NotFound 忽略)。
         Ok(Self {
             binary: binary.to_path_buf(),
             expected_version,
+            cache_dir: cache_dir.to_path_buf(),
             socket_path: std::mem::take(&mut launched.socket_path),
             user: std::mem::take(&mut launched.user),
             pass: std::mem::take(&mut launched.pass),
             child: std::mem::take(&mut launched.child),
             state: RcdState::Ready,
+        })
+    }
+
+    /// 就绪后按需探活:执行一次 `core/version` 并返回上报版本串(如 "v1.75.1");
+    /// 连通失败/载荷不可解析经 `RcdNotReady`(Retryable)上浮,零吞错(T03 卡⑥
+    /// 集成测试与 WP03 rc 客户端落地前的最小观测面)。
+    pub fn probe_core_version(&self) -> Result<String, EngineError> {
+        let payload = run_rc_method(
+            &self.binary,
+            &self.socket_path,
+            &self.user,
+            &self.pass,
+            "core/version",
+        )?;
+        parse_core_version(&payload).ok_or_else(|| {
+            EngineError::new(
+                EngineErrorKind::RcdNotReady(format!("unparsable core/version payload: {payload}")),
+                Severity::Retryable,
+            )
         })
     }
 
@@ -308,7 +310,8 @@ impl RcdSupervisor {
         self.state = RcdState::Starting;
         for delay in RESTART_DELAYS {
             thread::sleep(delay);
-            match launch_and_probe(&self.binary, &self.expected_version) {
+            // 重启按同槽位 cache_dir 重注入(槽位参数随监督器存活周期保持)。
+            match launch_and_probe(&self.binary, &self.cache_dir, &self.expected_version) {
                 Ok(mut launched) => {
                     // mem::take 逐字段提取(RcdLaunch 有 Drop 不可搬移,见 spawn 注)。
                     self.socket_path = std::mem::take(&mut launched.socket_path);
@@ -410,10 +413,53 @@ impl Drop for RcdSupervisor {
     }
 }
 
+/// 对指定连接要素执行一次 `rclone rc <method>`(同一 socket + env 认证,argv
+/// 零凭据);成功返回 stdout 文本,非零退出 → Retryable(stderr/stdout 首行截断
+/// 入载荷)。探活路径与 `probe_core_version` 观测面共用同一实现,零分叉。
+fn run_rc_method(
+    binary: &Path,
+    socket_path: &Path,
+    user: &str,
+    pass: &str,
+    method: &str,
+) -> Result<String, EngineError> {
+    let output = Command::new(binary)
+        .arg("rc")
+        .arg("--unix-socket")
+        .arg(socket_path)
+        .env(AUTH_USER_ENV, user)
+        .env(AUTH_PASS_ENV, pass)
+        .arg(method)
+        .output()
+        .map_err(|err| {
+            EngineError::new(
+                EngineErrorKind::RcdNotReady(format!("rc probe spawn failed: {err}")),
+                Severity::Retryable,
+            )
+        })?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+    // rclone rc 把错误 JSON 打到 stdout、NOTICE 打到 stderr:都带上,截断防刷屏。
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = first_line(&stderr)
+        .or_else(|| first_line(&stdout))
+        .unwrap_or_else(|| "no diagnostic output".into());
+    Err(EngineError::new(
+        EngineErrorKind::RcdNotReady(format!("rc {method} failed ({}): {detail}", output.status)),
+        Severity::Retryable,
+    ))
+}
+
 /// 拉起 + 就绪探活(首次 spawn 与崩溃重启共用同一强度:新 socket/新凭据/全量
 /// 探活);失败路径内部收尾(杀进程+清 socket)后上浮,不留孤儿进程。
-fn launch_and_probe(binary: &Path, expected_version: &str) -> Result<RcdLaunch, EngineError> {
-    let mut launched = launch(binary)?;
+fn launch_and_probe(
+    binary: &Path,
+    cache_dir: &Path,
+    expected_version: &str,
+) -> Result<RcdLaunch, EngineError> {
+    let mut launched = launch(binary, cache_dir)?;
     match launched.wait_until_ready(expected_version) {
         Ok(()) => Ok(launched),
         Err(err) => {
@@ -429,7 +475,7 @@ fn launch_and_probe(binary: &Path, expected_version: &str) -> Result<RcdLaunch, 
 
 /// 生成连接要素并 spawn rcd(卡内 ①:unix socket 随机名 + 随机凭据 + 最小参数集)。
 #[cfg(not(unix))]
-fn launch(_binary: &Path) -> Result<RcdLaunch, EngineError> {
+fn launch(_binary: &Path, _cache_dir: &Path) -> Result<RcdLaunch, EngineError> {
     // 卡内安全模式=unix socket,无 TCP 回退(禁止行为清单):非 unix 平台
     // 显式 Fatal 上浮,不静默降级。
     Err(EngineError::new(
@@ -441,17 +487,21 @@ fn launch(_binary: &Path) -> Result<RcdLaunch, EngineError> {
     ))
 }
 
-/// unix 实现:spawn rcd 进程(最小参数集,认证走 env,argv 零明文 pass)。
+/// unix 实现:spawn rcd 进程(最小参数集,认证走 env,argv 零明文 pass;
+/// `--cache-dir` 注入槽位缓存路径,T03 槽位参数化)。
 #[cfg(unix)]
-fn launch(binary: &Path) -> Result<RcdLaunch, EngineError> {
+fn launch(binary: &Path, cache_dir: &Path) -> Result<RcdLaunch, EngineError> {
     let socket_path = random_socket_path()?;
     let (user, pass) = generate_credentials()?;
     // 最小参数集:rcd 默认仅开 rc 服务;`--rc-addr unix://…` 强制 unix socket
-    // (1.75.1 实测核实,零 TCP/默认端口)。
+    // (1.75.1 实测核实,零 TCP/默认端口);`--cache-dir` 为 1.75.1 全局 flag
+    // (`rclone help flags` + rcd 组合烟测实测)。
     let child = Command::new(binary)
         .arg("rcd")
         .arg("--rc-addr")
         .arg(format!("unix://{}", socket_path.display()))
+        .arg("--cache-dir")
+        .arg(cache_dir)
         .env(AUTH_USER_ENV, &user)
         .env(AUTH_PASS_ENV, &pass)
         .spawn()
@@ -534,7 +584,11 @@ mod tests {
 
     /// 测试用 rclone 解析顺序(卡内 ⑥):env `PARTIVERSE_TEST_RCLONE_BIN` >
     /// 默认引擎根(manifest 锁定版本);缺失→显式 panic+安装指引,禁止静默 skip。
+    /// 解析读 env(PARTIVERSE_*):持 slots::test_env_lock(T03)防并发写竞态。
     fn test_rclone_binary() -> PathBuf {
+        let _guard = crate::slots::test_env_lock::ENV_LOCK
+            .lock()
+            .expect("env lock");
         if let Some(path) = std::env::var_os(TEST_BIN_ENV).filter(|value| !value.is_empty()) {
             let path = PathBuf::from(path);
             assert!(
@@ -561,12 +615,22 @@ mod tests {
         binary
     }
 
+    /// 测试用槽位 cache 目录(pid 唯一化;测试收尾自行清理)。
+    fn test_cache_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("partiverse-rcd-cache-{tag}-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create test cache dir");
+        dir
+    }
+
     #[test]
     fn spawn_probes_ready_then_shuts_down_gracefully_and_cleans_socket() {
         // 卡内 ⑥ 场景一:spawn → 探活(Ready)→ 优雅退出(Exited)+ socket 清理;
         // 并断言凭据脱敏(Debug 面零明文 pass/user)。
         let binary = test_rclone_binary();
-        let mut supervisor = RcdSupervisor::spawn(&binary).expect("rcd spawn must reach ready");
+        let cache_dir = test_cache_dir("graceful");
+        let mut supervisor =
+            RcdSupervisor::spawn(&binary, &cache_dir).expect("rcd spawn must reach ready");
         assert_eq!(supervisor.state(), RcdState::Ready);
         assert!(
             supervisor.socket_path().exists(),
@@ -589,13 +653,16 @@ mod tests {
             !supervisor.socket_path().exists(),
             "socket must be cleaned after shutdown"
         );
+        let _ = fs::remove_dir_all(&cache_dir);
     }
 
     #[test]
     fn sigkill_triggers_backoff_restart_and_reprobes_ready() {
         // 卡内 ⑥ 场景二:SIGKILL 杀进程 → 指数退避自动重启 → 再探活(Ready)。
         let binary = test_rclone_binary();
-        let mut supervisor = RcdSupervisor::spawn(&binary).expect("rcd spawn must reach ready");
+        let cache_dir = test_cache_dir("restart");
+        let mut supervisor =
+            RcdSupervisor::spawn(&binary, &cache_dir).expect("rcd spawn must reach ready");
         let original_pid = supervisor.pid().expect("pid available while running");
         let original_socket = supervisor.socket_path().to_path_buf();
         // 测试模拟崩溃:外部 SIGKILL(生产路径无 kill 调用)。
@@ -634,14 +701,18 @@ mod tests {
         supervisor
             .shutdown()
             .expect("graceful shutdown after restart");
+        let _ = fs::remove_dir_all(&cache_dir);
     }
 
     #[test]
     fn bad_binary_path_fails_as_fatal() {
         // 卡内 ⑥ 场景三:坏二进制路径 → Failed 上浮(Fatal,不静默、不 panic)。
         let missing = std::env::temp_dir().join("partiverse-missing-rclone-for-t02");
-        let err = RcdSupervisor::spawn(&missing).expect_err("bad binary path must fail");
+        let cache_dir = test_cache_dir("bad-binary");
+        let err =
+            RcdSupervisor::spawn(&missing, &cache_dir).expect_err("bad binary path must fail");
         assert_eq!(err.severity(), Severity::Fatal);
         assert!(matches!(err.kind(), Kind::RcdStartFailed(_)));
+        let _ = fs::remove_dir_all(&cache_dir);
     }
 }
