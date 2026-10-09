@@ -1,0 +1,51 @@
+name: Bug 报告
+description: 报告 Partiverse 的缺陷(崩溃 / 功能异常 / 门禁红灯等)
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈!提交前请先检索既有 issue,避免重复。
+        **合规与隐私提醒**:请勿粘贴任何凭据、令牌、账号信息(本项目红线:凭据只存用户设备,不入库不入档)。
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么?
+      description: 描述问题现象与期望行为,越具体越好。
+    validations:
+      required: true
+  - type: textarea
+    id: repro-steps
+    attributes:
+      label: 复现步骤
+      description: 从可复现的初始状态到问题出现的最小步骤序列。
+      placeholder: |
+        1. 打开 …
+        2. 点击 …
+        3. 出现 …
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 平台
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - 其他 / 多平台
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 应用版本号或源码提交哈希(如 v0.1.0 / a124774)。
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / 截图
+      description: 相关报错日志或截图(务必隐去凭据与个人文件内容)。

@@ -1,0 +1,35 @@
+name: 功能请求
+description: 提议新功能或对既有功能的改进
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢提议!请优先描述**要解决的问题与使用场景**,而非仅列出实现方案。
+        **合规边界**:Partiverse 只接入官方开放平台 API 与标准协议(不逆向协议、不限速规避、不批量爬取),
+        超出该边界的请求无法受理。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 描述你遇到的使用场景与痛点。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的方案
+      description: 你设想的解决方式(可选,具体建议更受欢迎)。
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 备选方案
+      description: 是否考虑过其他实现方式或临时绕行办法?
+  - type: checkboxes
+    id: compliance
+    attributes:
+      label: 合规自检
+      options:
+        - label: 本请求不要求逆向协议、绕过限速或批量爬取(产品合规红线,违反即无法受理)
+          required: true
