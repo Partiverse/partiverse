@@ -28,3 +28,6 @@ Thumbs.db
 # Local untracked config (test accounts etc. — D34)
 config/local.*
 *.local.toml
+
+# AI 代理本地工具目录(workflows 与 run 转写,永不入库)
+/.zcode/
