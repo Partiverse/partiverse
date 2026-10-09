@@ -15,8 +15,17 @@ pub enum ErrorKind {
     /// 本地 IO(配置、缓存等读写失败)。
     Io,
     /// 配置缺失或非法。
+    ///
+    /// IPC 线格式契约类别:生产代码构造点随首个配置读取命令落地。非测试构建下以
+    /// `expect` 声明「尚未构造」——一旦出现构造点会因期望未失效报警,届时删除本属性
+    /// (优于 allow 永久压制);测试 target 构造它以钉住线格式值,故属性限定 not(test)。
+    #[cfg_attr(not(test), expect(dead_code))]
     Config,
     /// 未归类内部错误(兜底;分类困难时不得用它掩盖可判定类别)。
+    ///
+    /// IPC 线格式契约类别:生产代码构造点随首个运行时兜底转换(如 From<tauri::Error>)
+    /// 落地,届时删除本属性(机制同上)。
+    #[cfg_attr(not(test), expect(dead_code))]
     Internal,
 }
 
@@ -62,5 +71,20 @@ mod tests {
         let json = serde_json::to_value(&err).expect("test serialization must not fail");
         assert_eq!(json["kind"], "io");
         assert_eq!(json["msg"], "disk full");
+    }
+
+    /// IPC 线格式契约:全部 kind 的 snake_case 线值(前端按此字符串分支,变更即破坏性)。
+    #[test]
+    fn all_error_kinds_wire_values_are_snake_case() {
+        for (kind, wire) in [
+            (ErrorKind::Io, "io"),
+            (ErrorKind::Config, "config"),
+            (ErrorKind::Internal, "internal"),
+        ] {
+            let json = serde_json::to_value(CmdError::new(kind, "x"))
+                .expect("test serialization must not fail");
+            assert_eq!(json["kind"], wire);
+            assert_eq!(json["msg"], "x");
+        }
     }
 }
