@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "note": "配额参数表内置默认档(M1-WP03-T03):provider 事实一律以 source 键注明唯一来源,禁止凭记忆编造,其余 provider V1 留空表结构待 WP11 实测回填;用户配置目录 partiverse/quota-profiles.json 同 schema 覆盖(profiles 按键覆盖/新增,bwlimit/backoff_secs 提供即整键覆盖)。",
+  "profiles": {
+    "jianguoyun": { "requests_per_window": 600, "window_secs": 1800, "source": "docs/06-架构设计-Phase0草案.md §6 配额预算器条:坚果云 600req/30min 明文(本表唯一 provider 事实)" }
+  },
+  "bwlimit": { "rate": "off", "source": "策略默认值(非 provider 事实):默认不限速;字节限速下沉 rclone core/bwlimit 全局限速(--bwlimit 同语法),用户配置覆盖" },
+  "backoff_secs": 60,
+  "backoff_source": "策略默认值(非 provider 事实):429/503 反馈退避基数(架构 §3:429/503 一律交预算器退避),保守 60s 起步,WP11 实测后可调"
+}

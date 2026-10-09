@@ -6,6 +6,7 @@
 /// crate 版本(占位;由 Cargo.toml 注入,随版本纪律 D37 联动)。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod budget;
 pub mod caps;
 pub mod error;
 pub mod jobs;
