@@ -11,6 +11,7 @@
 
 use std::fmt;
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -149,6 +150,7 @@ impl RcClient {
 
     /// 一次完整调用:序列化 → 连接 → 写请求 → deadline 内读应答;IO 错误按
     /// 核心 `classify_io` 分级(网络瞬态 → Retryable)。
+    #[cfg(unix)]
     fn execute(&self, method: &str, params: &serde_json::Value) -> Result<RcReply, EngineError> {
         let body = serde_json::to_vec(params).map_err(|err| {
             EngineError::new(
@@ -171,6 +173,18 @@ impl RcClient {
         let request = render_request(method, &body, &basic_auth_value(&self.user, &self.pass));
         write_all_deadline(&stream, &request, &budget)?;
         read_reply(&stream, &budget)
+    }
+}
+
+/// 非 unix 平台:架构 §3 控制面仅 unix socket、禁 TCP,显式 Fatal 上浮
+/// (ADR-0005 同款口径,Windows 目标编译不受影响)。
+#[cfg(not(unix))]
+impl RcClient {
+    fn execute(&self, _method: &str, _params: &serde_json::Value) -> Result<RcReply, EngineError> {
+        Err(EngineError::new(
+            EngineErrorKind::PlatformUnsupported("rc 客户端仅支持 unix socket 平台".into()),
+            Severity::Fatal,
+        ))
     }
 }
 
@@ -251,6 +265,7 @@ fn encode_base64(data: &[u8]) -> String {
 }
 
 /// deadline 内写全请求(短写续写;超时 → `RcTimeout`,其他 IO 按分级上浮)。
+#[cfg(unix)]
 fn write_all_deadline(
     mut stream: &UnixStream,
     mut data: &[u8],
@@ -276,6 +291,7 @@ fn write_all_deadline(
 
 /// deadline 内单次读取(超时 → `RcTimeout`;EINTR 预算内重试;EOF 由调用方
 /// 按帧式语义裁决;其他 IO 按核心分级上浮)。
+#[cfg(unix)]
 fn read_once(
     mut stream: &UnixStream,
     budget: &CallBudget,
@@ -308,6 +324,7 @@ fn read_once(
 }
 
 /// deadline 内读满 `buffer`(中断帧合成 ConnectionReset → classify_io Retryable)。
+#[cfg(unix)]
 fn read_exact_deadline(
     stream: &UnixStream,
     budget: &CallBudget,
@@ -328,6 +345,7 @@ fn read_exact_deadline(
 }
 
 /// deadline 内读一行(以 `\n` 结界,尾 `\r` 剥除;连接中断行 = 瞬态同上)。
+#[cfg(unix)]
 fn read_line_deadline(stream: &UnixStream, budget: &CallBudget) -> Result<String, EngineError> {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
@@ -354,6 +372,7 @@ fn read_line_deadline(stream: &UnixStream, budget: &CallBudget) -> Result<String
 }
 
 /// 读取完整应答:帧式按 Content-Length / chunked / close 三分,deadline 内完成。
+#[cfg(unix)]
 fn read_reply(stream: &UnixStream, budget: &CallBudget) -> Result<RcReply, EngineError> {
     let status_line = read_line_deadline(stream, budget)?;
     let status = parse_status_line(&status_line)?;
@@ -410,6 +429,7 @@ fn parse_status_line(line: &str) -> Result<u16, EngineError> {
 }
 
 /// chunked 帧式读取(RFC 9112 §7.1;0 长度后吞 trailer 至空行;中断 = 瞬态)。
+#[cfg(unix)]
 fn read_chunked_body(stream: &UnixStream, budget: &CallBudget) -> Result<Vec<u8>, EngineError> {
     let mut body = Vec::new();
     loop {
@@ -437,6 +457,7 @@ fn read_chunked_body(stream: &UnixStream, budget: &CallBudget) -> Result<Vec<u8>
 }
 
 /// close 定界读取(至 EOF;EOF 即成功终点)。
+#[cfg(unix)]
 fn read_to_deadline_eof(stream: &UnixStream, budget: &CallBudget) -> Result<Vec<u8>, EngineError> {
     let mut body = Vec::new();
     let mut buffer = [0u8; 8192];

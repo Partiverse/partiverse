@@ -2,6 +2,8 @@
 //! → `EngineHandle.rc_client` 调 `core/version` 成功 + 白名单外本地拒绝(Fatal
 //! 含被拒名)+ 错误映射真机锚定(config/get 缺参 → 400 → Fatal)。前置:rclone
 //! 预装默认引擎根(缺失 → 显式失败,禁静默 skip;禁真实网络下载)。
+// unix socket 门:非 unix 平台本集成无对象(架构 §3 禁 TCP,见 client.rs 平台口径)。
+#![cfg(unix)]
 
 use std::fs;
 use std::path::PathBuf;
