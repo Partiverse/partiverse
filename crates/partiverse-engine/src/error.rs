@@ -30,6 +30,30 @@ pub enum EngineErrorKind {
     },
     /// zip 损坏或引擎二进制条目缺失(Fatal);载荷=失败点描述。
     ExtractFailed(String),
+    /// 加密随机源不可用(rcd 随机凭据/socket 名生成失败,凭据缺失不可降级,Fatal)。
+    RandomSourceUnavailable(String),
+    /// rcd 进程无法启动(二进制缺失/不可执行,重试无意义,Fatal);载荷=失败点描述。
+    RcdStartFailed(String),
+    /// rcd 就绪探活在窗口内未通过(冷启动慢/瞬态不可达,Retryable);载荷=窗口与最后探活根因。
+    RcdNotReady(String),
+    /// rcd 上报版本与 manifest 锁定版本不符(装错引擎,重装才有意义,Fatal)。
+    RcdVersionMismatch {
+        /// manifest 锚定期望版本(如 "v1.75.1")。
+        expected: String,
+        /// rcd 实际上报版本。
+        actual: String,
+    },
+    /// 优雅退出未完成(SIGTERM 投递异常/收尾清理失败,Fatal);载荷=失败点描述。
+    RcdShutdownFailed(String),
+    /// 崩溃重启耗尽指数退避(≤5 次)进入 Failed 终态(Fatal)。
+    RcdRestartExhausted {
+        /// 本幕已尝试的重启次数。
+        attempts: u32,
+        /// 最后一次失败的根因(零静默)。
+        last_cause: String,
+    },
+    /// 监督器状态机非法调用(如 Exited 后再 ensure_running,编程错误,Fatal);载荷=状态与调用。
+    RcdInvalidState(String),
 }
 
 /// 单个下载源的一次尝试记录(失败原因全量上浮)。
@@ -141,6 +165,30 @@ impl fmt::Display for EngineErrorKind {
                 )
             }
             EngineErrorKind::ExtractFailed(detail) => write!(f, "extract failed: {detail}"),
+            EngineErrorKind::RandomSourceUnavailable(detail) => {
+                write!(f, "random source unavailable: {detail}")
+            }
+            EngineErrorKind::RcdStartFailed(detail) => write!(f, "rcd start failed: {detail}"),
+            EngineErrorKind::RcdNotReady(detail) => write!(f, "rcd not ready: {detail}"),
+            EngineErrorKind::RcdVersionMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "rcd version mismatch: expected {expected}, actual {actual}"
+                )
+            }
+            EngineErrorKind::RcdShutdownFailed(detail) => {
+                write!(f, "rcd shutdown failed: {detail}")
+            }
+            EngineErrorKind::RcdRestartExhausted {
+                attempts,
+                last_cause,
+            } => {
+                write!(
+                    f,
+                    "rcd restart exhausted after {attempts} attempt(s): {last_cause}"
+                )
+            }
+            EngineErrorKind::RcdInvalidState(detail) => write!(f, "rcd invalid state: {detail}"),
         }
     }
 }

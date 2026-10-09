@@ -19,4 +19,7 @@ sha2 = "0.11.0" # zip/落盘二进制 sha256 完整性校验(RustCrypto)
 ureq = "3.4.2"
 # zip 解包仅读取:deflate 后端取 zlib-rs(纯 Rust),关 aes/zstd/bzip2/zopfli 等无关特性收敛依赖树。
 zip = { version = "9.0.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# SIGTERM 优雅退出(T02):std 仅有 SIGKILL,libc 直调需 unsafe(workspace 禁);
+# nix 安全封装,default-features=false 仅 signal 特性收敛依赖树(ADR-0005)。
+nix = { version = "0.31.3", default-features = false, features = ["signal"] }
 # 注:安装根解析不引 dirs(与 ring 的 windows-sys 版本冲突触发 deny multiple-versions,见 ADR-0004)。
