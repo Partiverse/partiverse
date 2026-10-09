@@ -1,0 +1,11 @@
+{
+  "slots": [
+    {
+      "id": "default",
+      "remote_namespace": "pv",
+      "data_port": 0,
+      "cache_dir": null,
+      "engine_root": null
+    }
+  ]
+}

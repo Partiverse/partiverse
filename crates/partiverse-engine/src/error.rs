@@ -54,6 +54,13 @@ pub enum EngineErrorKind {
     },
     /// 监督器状态机非法调用(如 Exited 后再 ensure_running,编程错误,Fatal);载荷=状态与调用。
     RcdInvalidState(String),
+    /// 槽位配置非法(解析/字段校验失败/显式 env 文件缺失,Fatal);载荷=失败点描述。
+    SlotConfigInvalid(String),
+    /// 请求的槽位 id 不在已加载槽位表中(配置数据问题,Fatal);载荷=slot id。
+    SlotNotFound(String),
+    /// 引擎协调器状态机非法调用(单实例槽位冲突/未知槽位 shutdown/probe,
+    /// 编程或配置错误,Fatal);载荷=描述。
+    CoordinatorInvalidState(String),
 }
 
 /// 单个下载源的一次尝试记录(失败原因全量上浮)。
@@ -189,6 +196,13 @@ impl fmt::Display for EngineErrorKind {
                 )
             }
             EngineErrorKind::RcdInvalidState(detail) => write!(f, "rcd invalid state: {detail}"),
+            EngineErrorKind::SlotConfigInvalid(detail) => {
+                write!(f, "slot config invalid: {detail}")
+            }
+            EngineErrorKind::SlotNotFound(slot_id) => write!(f, "slot not found: {slot_id}"),
+            EngineErrorKind::CoordinatorInvalidState(detail) => {
+                write!(f, "engine coordinator invalid state: {detail}")
+            }
         }
     }
 }
