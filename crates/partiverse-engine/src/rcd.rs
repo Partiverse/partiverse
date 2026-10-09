@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use partiverse_core::error::Severity;
 
+use crate::client::RcClient;
 use crate::error::{EngineError, EngineErrorKind};
 use crate::manifest::EngineManifest;
 
@@ -277,6 +278,17 @@ impl RcdSupervisor {
     #[must_use]
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    /// 铸造 rc 白名单客户端(卡内 ④ supervisor 等价路径,凭据 Debug 脱敏);
+    /// 崩溃重启换新要素后,旧 client 连接失败(Retryable)须经本方法重取。
+    #[must_use]
+    pub fn rc_client(&self) -> RcClient {
+        RcClient::new(
+            self.socket_path.clone(),
+            self.user.clone(),
+            self.pass.clone(),
+        )
     }
 
     /// 确保引擎进程存活(卡内 ④):检测到意外退出即按指数退避(1s/2s/4s/8s/16s)

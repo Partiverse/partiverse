@@ -5,6 +5,7 @@
 //! 供单测直接断言,不依赖字符串匹配。
 
 use std::fmt;
+use std::time::Duration;
 
 use partiverse_core::error::{Severity, classify_io};
 
@@ -61,6 +62,37 @@ pub enum EngineErrorKind {
     /// 引擎协调器状态机非法调用(单实例槽位冲突/未知槽位 shutdown/probe,
     /// 编程或配置错误,Fatal);载荷=描述。
     CoordinatorInvalidState(String),
+    // —— 以下为 M1-WP03-T01 rc 客户端新增(载荷字段:method=canonical 名、
+    // status=HTTP 状态、detail=rc error 文本或原始体截断)——
+    /// rc 白名单外方法本地拒绝(编程或注入错误,请求未出本进程,Fatal);
+    /// 载荷=被拒方法名(错误信息含名,卡内 ②)。
+    RcMethodRejected(String),
+    /// rc 请求参数序列化失败(Fatal);载荷=失败点描述。
+    RcRequestInvalid(String),
+    /// rc 应答协议不合法(重试同引擎无意义,Fatal);截断/中断瞬态走 `Io`。
+    RcResponseInvalid(String),
+    /// rc 单次调用超时(默认 10s 可配置,防僵死;Retryable);载荷=配置值。
+    RcTimeout { timeout: Duration },
+    /// rc 限流(Throttled 标记 = 交 T03 配额预算器退避消费,不直接抛 UI,
+    /// 架构 §3;Retryable)。
+    RcThrottled {
+        method: String,
+        status: u16,
+        detail: String,
+    },
+    /// rc 服务端错误(HTTP 5xx,Retryable);载荷=命令/状态/详情。
+    RcServerError {
+        method: String,
+        status: u16,
+        detail: String,
+    },
+    /// rc 客户端类错误(HTTP 4xx 参数/权限等,非 429/503,重试无意义,Fatal);
+    /// 载荷=命令/状态/详情。
+    RcClientError {
+        method: String,
+        status: u16,
+        detail: String,
+    },
 }
 
 /// 单个下载源的一次尝试记录(失败原因全量上浮)。
@@ -202,6 +234,33 @@ impl fmt::Display for EngineErrorKind {
             EngineErrorKind::SlotNotFound(slot_id) => write!(f, "slot not found: {slot_id}"),
             EngineErrorKind::CoordinatorInvalidState(detail) => {
                 write!(f, "engine coordinator invalid state: {detail}")
+            }
+            EngineErrorKind::RcMethodRejected(m) => write!(f, "rc method not whitelisted: {m}"),
+            EngineErrorKind::RcRequestInvalid(d) => write!(f, "rc request invalid: {d}"),
+            EngineErrorKind::RcResponseInvalid(d) => write!(f, "rc response invalid: {d}"),
+            EngineErrorKind::RcTimeout { timeout } => {
+                write!(f, "rc call timed out after {timeout:?}")
+            }
+            EngineErrorKind::RcThrottled {
+                method,
+                status,
+                detail,
+            } => {
+                write!(f, "rc throttled ({method}, http {status}): {detail}")
+            }
+            EngineErrorKind::RcServerError {
+                method,
+                status,
+                detail,
+            } => {
+                write!(f, "rc server error ({method}, http {status}): {detail}")
+            }
+            EngineErrorKind::RcClientError {
+                method,
+                status,
+                detail,
+            } => {
+                write!(f, "rc client error ({method}, http {status}): {detail}")
             }
         }
     }

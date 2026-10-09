@@ -5,6 +5,7 @@
 //! 探活 / 优雅退出 / 崩溃退避重启);T03 续落地引擎槽位编排。
 //! 依赖集与 license 审计见 docs/adr/0004*.md 与 docs/adr/0005*.md。
 
+pub mod client;
 pub mod coordinator;
 pub mod error;
 pub mod hash;
@@ -14,6 +15,7 @@ pub mod rcd;
 pub mod slots;
 pub mod source;
 
+pub use client::{RcClient, RcMethod};
 pub use coordinator::{EngineCoordinator, EngineHandle};
 pub use error::{EngineError, EngineErrorKind};
 pub use installer::EngineInstaller;
