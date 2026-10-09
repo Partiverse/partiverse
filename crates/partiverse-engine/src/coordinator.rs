@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 use partiverse_core::error::Severity;
 
+use crate::client::RcClient;
 use crate::error::{EngineError, EngineErrorKind};
 use crate::installer::EngineInstaller;
 use crate::rcd::{RcdState, RcdSupervisor};
@@ -33,6 +34,9 @@ pub struct EngineHandle {
     pub pid: Option<u32>,
     /// 本次实例的 unix socket 路径(WP03 rc 客户端连接要素之一)。
     pub socket_path: PathBuf,
+    /// rc 白名单客户端(卡内 ④ 消费面,凭据 Debug 脱敏;快照口径,引擎崩溃
+    /// 重启换新要素后须重新 `ensure` 取新句柄)。
+    pub rc_client: RcClient,
 }
 
 /// 单实例活动槽位(协调器私有:槽位参数 + 监督器成对持有)。
@@ -44,13 +48,14 @@ struct ActiveSlot {
 }
 
 impl ActiveSlot {
-    /// 生成句柄快照(取监督器观测面字段,零凭据泄漏)。
+    /// 生成句柄快照(取监督器观测面字段;rc_client 含凭据但 `Debug` 脱敏)。
     fn handle(&self) -> EngineHandle {
         EngineHandle {
             slot_id: self.slot.id.clone(),
             state: self.supervisor.state(),
             pid: self.supervisor.pid(),
             socket_path: self.supervisor.socket_path().to_path_buf(),
+            rc_client: self.supervisor.rc_client(),
         }
     }
 }
