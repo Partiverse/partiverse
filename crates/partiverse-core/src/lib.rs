@@ -8,6 +8,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod caps;
 pub mod error;
+pub mod jobs;
 
 /// 数据模型空壳:由 WP08(索引与搜索)的数据模型落地,当前刻意留空。
 pub mod types;
