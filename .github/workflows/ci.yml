@@ -49,6 +49,12 @@ jobs:
         run: cargo fmt --all -- --check
       - name: 门禁 2/5 clippy(-D warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # M1-WP02-T01 卡⑧(仅追加,不改门禁命令):按随仓 engine-manifest.json 校验并安装
+      # rclone 1.75.1 至默认引擎根(~/.local/share/partiverse/engine,sha256 校验+多源回退,
+      # 二进制经测试版 engine-install 落盘;URL/哈希全部来自 manifest,代码零硬编码端点)。
+      # 产物供 T02(rcd spawn)/T03(槽位编排)的测试使用,故置于 cargo test 之前。
+      - name: 按 manifest 安装 rclone 1.75.1 至默认引擎根
+        run: cargo run -p partiverse-engine --bin engine-install
       - name: 门禁 3/5 cargo test
         run: cargo test --workspace
       # pnpm 主版本与本地一致(12.10.1,pnpm-lock.yaml lockfileVersion 9.0);action 无法从

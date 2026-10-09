@@ -1,5 +1,5 @@
-# partiverse-engine:rclone rcd 引擎协调器。
-# 占位空壳:由 WP02(引擎协调器)落地,当前不含任何实现。
+# partiverse-engine:rclone rcd 引擎协调器(T01=引擎分发器;T02/T03 落地 rcd spawn 与槽位编排)。
+# 依赖集与 license 审计见 docs/adr/0004*.md(AGENTS.md 铁律 8:新依赖需 ADR)。
 [package]
 name = "partiverse-engine"
 version = "0.1.0"
@@ -9,4 +9,14 @@ license = "AGPL-3.0"
 publish = false
 
 [dependencies]
-# 零依赖基线(M1);新依赖需 ADR(AGENTS.md 铁律 8)。
+# Severity 错误分级底座(同 workspace 内部依赖;显式 version 避免 deny wildcards=deny 误伤)。
+partiverse-core = { path = "../partiverse-core", version = "0.1.0" }
+hex = "0.4.3" # 摘要 hex 编解码(manifest 校验值与实测值比对)
+serde = { version = "1.0.229", features = ["derive"] } # manifest 反序列化
+serde_json = "1.0.151"
+sha2 = "0.11.0" # zip/落盘二进制 sha256 完整性校验(RustCrypto)
+# 多源下载同步 HTTP 客户端(默认 rustls+ring,证书校验不可关;阻塞调用由调用方放 spawn_blocking)。
+ureq = "3.4.2"
+# zip 解包仅读取:deflate 后端取 zlib-rs(纯 Rust),关 aes/zstd/bzip2/zopfli 等无关特性收敛依赖树。
+zip = { version = "9.0.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# 注:安装根解析不引 dirs(与 ring 的 windows-sys 版本冲突触发 deny multiple-versions,见 ADR-0004)。
