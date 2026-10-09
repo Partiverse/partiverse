@@ -26,3 +26,19 @@
 - 决策要点:国内优先;纯官方 API+标准协议(123 仅 WebDAV);桌面三端 Tauri+React(shadcn 基座);开源核心(AGPL-3.0)+Pro;rclone 引擎;与 [PartiSync](https://github.com/Partiverse/partisync) 互补协作+能力边界宪法(D27);场景框架(D26);开发=partisync 规格驱动+ZCode Workflow(执行方案 §8)。
 - 保密纪律:产品中文名保密中(仓库内已脱敏);GUI 语言=English only(D29);品牌资产=占位(D28,REPLACE-BEFORE-RELEASE 为发布 gate)。
 - 当前:M1-WP01 任务卡已立(T01 工作区/T02 应用壳/T03 CI),按 Workflow 模板执行;Phase 0 关账条件=Owner 完成百度/123 提交+法务终审;简报节奏见 [P0-report](./docs/reports/P0-report.md)。
+
+## 构建与 CI 门禁
+
+[![CI](https://github.com/Partiverse/partiverse/actions/workflows/ci.yml/badge.svg)](https://github.com/Partiverse/partiverse/actions/workflows/ci.yml)
+
+Rust 工具链由仓库根 `rust-toolchain.toml` 钉版(cargo/rustc 1.99.0,rustup 进入本仓库自动选用,见 [ADR-0001](./docs/adr/0001-toolchain-pinning.md))。本地等效门禁与 CI 五门禁一致:
+
+```bash
+cargo fmt --all -- --check                             # 门禁 1:格式
+cargo clippy --workspace --all-targets -- -D warnings  # 门禁 2:lint
+cargo test --workspace                                 # 门禁 3:测试
+pnpm install --frozen-lockfile && pnpm build           # 门禁 4:前端(app/ 下执行,tsc + vite)
+cargo deny check                                       # 门禁 5:依赖审计(licenses/bans/sources/advisories)
+```
+
+前端无独立 lint 脚本(app/package.json scripts=dev/build/preview/tauri),`tsc` 已含类型检查;lint 脚本补齐后纳入门禁。分支保护要求(main 禁直推、PR+CI 绿)见 [.github/BRANCH_PROTECTION.md](./.github/BRANCH_PROTECTION.md)。
