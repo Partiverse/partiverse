@@ -127,8 +127,9 @@ impl fmt::Display for JobErrorKind {
 impl std::error::Error for JobErrorKind {}
 
 impl JobErrorKind {
-    /// Fatal 构造:kind 挂 `PartisyError.source()`(severity 直读,kind 经 [`kind_of`] 还原)。
-    fn fatal(self) -> PartisyError {
+    /// Fatal 构造:kind 挂 `PartisyError.source()`(severity 直读,kind 经 [`kind_of`] 还原;
+    /// budget 模块同库复用)。
+    pub(crate) fn fatal(self) -> PartisyError {
         PartisyError {
             severity: Severity::Fatal,
             source: Some(Box::new(self)),
@@ -144,16 +145,16 @@ pub fn kind_of(err: &PartisyError) -> Option<&JobErrorKind> {
         .and_then(|s| s.downcast_ref::<JobErrorKind>())
 }
 
-/// IO 错误构造:severity 由核心 `classify_io` 表驱动,原始错误挂根因链。
-fn io_err(err: std::io::Error) -> PartisyError {
+/// IO 错误构造:severity 由核心 `classify_io` 表驱动,原始错误挂根因链(budget 同库复用)。
+pub(crate) fn io_err(err: std::io::Error) -> PartisyError {
     PartisyError {
         severity: classify_io(err.kind()),
         source: Some(Box::new(err)),
     }
 }
 
-/// SQLite 错误构造(Fatal:本地持久化损坏;原文入 detail)。
-fn db_err(context: &str, err: rusqlite::Error) -> PartisyError {
+/// SQLite 错误构造(Fatal:本地持久化损坏;原文入 detail;budget 同库复用)。
+pub(crate) fn db_err(context: &str, err: rusqlite::Error) -> PartisyError {
     JobErrorKind::Db(format!("{context}: {err}")).fatal()
 }
 
@@ -184,8 +185,10 @@ const SCHEMA_MIGRATIONS_DDL: &str = "CREATE TABLE IF NOT EXISTS schema_migration
     applied_at TEXT NOT NULL
 )";
 
-/// 迁移脚本表(下标 i = 版本 i+1;只追加不改写)。v1 = jobs 最小字段集(红线 3)。
-const MIGRATIONS: &[&str] = &["CREATE TABLE jobs (
+/// 迁移脚本表(下标 i = 版本 i+1;只追加不改写)。v1 = jobs 最小字段集(红线 3);
+/// v2 = budget_state(T03 预算桶状态,DDL 单源在 [`crate::budget`],同库同框架)。
+pub(crate) const MIGRATIONS: &[&str] = &[
+    "CREATE TABLE jobs (
     id TEXT PRIMARY KEY NOT NULL,
     kind TEXT NOT NULL,
     src TEXT NOT NULL,
@@ -196,7 +199,9 @@ const MIGRATIONS: &[&str] = &["CREATE TABLE jobs (
     severity TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
-)"];
+)",
+    crate::budget::BUDGET_STATE_V1,
+];
 
 /// JobManager:状态机+落库+对账(单连接+Mutex:Connection 非 Sync,卡内边界)。
 pub struct JobManager {
@@ -292,6 +297,40 @@ impl JobManager {
             dst: dst.to_owned(),
             status: JobStatus::Queued,
             engine_job_id: Some(engine_job_id),
+            error: None,
+            severity: None,
+            created_at: now.clone(),
+            updated_at: now,
+        })
+    }
+
+    /// 登记一条 queued 行但零引擎触达(M1-WP03-T03 预算接缝:Exhausted 时 job 留
+    /// queued 不入引擎,`engine_job_id` 留空;复活/重排属 WP06,本层只落初态)。
+    pub fn register_queued(
+        &self,
+        kind: &str,
+        src: &str,
+        dst: &str,
+    ) -> Result<JobRecord, PartisyError> {
+        if kind.is_empty() || src.is_empty() || dst.is_empty() {
+            return Err(JobErrorKind::Invalid("kind/src/dst must not be empty".into()).fatal());
+        }
+        let (now, now_millis) = now_parts()?;
+        let id = new_job_id(now_millis);
+        self.lock()?
+            .execute(
+                "INSERT INTO jobs (id, kind, src, dst, status, engine_job_id, error, severity,
+                 created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, ?6, ?6)",
+                rusqlite::params![id, kind, src, dst, JobStatus::Queued.as_str(), now],
+            )
+            .map_err(|err| db_err("insert parked job", err))?;
+        Ok(JobRecord {
+            id,
+            kind: kind.to_owned(),
+            src: src.to_owned(),
+            dst: dst.to_owned(),
+            status: JobStatus::Queued,
+            engine_job_id: None,
             error: None,
             severity: None,
             created_at: now.clone(),
@@ -544,8 +583,9 @@ fn invalid_payload(method: &str, problem: &str, reply: &Value) -> PartisyError {
     JobErrorKind::Invalid(format!("{method}: {problem}: {brief}")).fatal()
 }
 
-/// 应用迁移(卡内 ②:最小框架;逐版本单事务,失败回滚后上滚;幂等)。
-fn run_migrations(conn: &Connection) -> Result<(), PartisyError> {
+/// 应用迁移(卡内 ②:最小框架;逐版本单事务,失败回滚后上滚;幂等;budget
+/// 打开同库时复用本入口,保证迁移序列全库单源)。
+pub(crate) fn run_migrations(conn: &Connection) -> Result<(), PartisyError> {
     conn.execute(SCHEMA_MIGRATIONS_DDL, ())
         .map_err(|err| db_err("create schema_migrations", err))?;
     let current: i64 = conn
@@ -589,8 +629,8 @@ fn run_migrations(conn: &Connection) -> Result<(), PartisyError> {
 
 /// 平台数据目录(与 engine installer 同语义自实现,ADR-0004 否决 dirs 同款;
 /// linux=XDG_DATA_HOME(仅绝对路径)→ $HOME/.local/share;macOS/win 各自已知
-/// 目录;平台中立,零 unix 专属 API)。
-fn platform_data_dir() -> Option<PathBuf> {
+/// 目录;平台中立,零 unix 专属 API;budget 同语义复用)。
+pub(crate) fn platform_data_dir() -> Option<PathBuf> {
     fn env_dir(key: &str) -> Option<PathBuf> {
         std::env::var_os(key)
             .filter(|value| !value.is_empty())
@@ -731,8 +771,9 @@ mod tests {
     }
 
     #[test]
-    fn migrations_create_version_one_and_are_idempotent() {
-        // 卡内 ⑥:首开 = v1(框架表+jobs);列集对照卡内最小字段集;重跑幂等。
+    fn migrations_create_latest_version_and_are_idempotent() {
+        // 卡内 ⑥:首开 = 最新版(框架表+jobs v1+budget_state v2,T03 只追加);
+        // 列集对照卡内最小字段集;重跑幂等。
         let mgr = mem_manager();
         let conn = mgr.lock().expect("lock");
         let version = |conn: &Connection| {
@@ -743,8 +784,8 @@ mod tests {
             )
             .expect("version")
         };
-        assert_eq!(version(&conn), 1);
+        assert_eq!(version(&conn), 2);
         run_migrations(&conn).expect("re-run idempotent");
-        assert_eq!(version(&conn), 1, "migration re-run is no-op");
+        assert_eq!(version(&conn), 2, "migration re-run is no-op");
     }
 }
