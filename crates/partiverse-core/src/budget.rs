@@ -3,8 +3,9 @@
 //! 决策面 [`BudgetScheduler::acquire`]→`Allow|Throttled(wait_until)|Exhausted`
 //! (Exhausted=cost 超桶容的结构性拒绝;Throttled 可等待,wait_until=窗口尾与
 //! 429/503 退避终点较大者);T01 `RcThrottled` 反馈 [`BudgetScheduler::backoff`]
-//! 延长桶等待(架构 §3「一律交预算器退避」——退避对无 profile 的 Node 同样生效;
-//! 「profile 缺失默认不限流」仅指主动配额,卡内边界)。持久化:budget_state 表 v1
+//! 延长桶等待——退避**仅对显式配置 profile 的 Node 生效**(Owner 裁定
+//! 2026-10-10:否决「无 profile 同样退避」;无 profile Node 的 429/503 照常
+//! 上浮,重试决策交上层,架构 §3「一律交预算器退避」按此收窄)。持久化:budget_state 表 v1
 //! 复用 T02 `schema_migrations` 框架与同库文件(v2 迁移只追加),写穿+开桶重载,
 //! 重启不丢(架构 §6);时间一律 unix 毫秒(时钟回拨=不滚动,保守)。配置:随仓
 //! `config/quota-profiles.default.json`(内置默认,provider 事实带 source 键)+
@@ -13,6 +14,11 @@
 //! [`JobManager::register_queued`] 留 queued 零引擎触达(复活属 WP06);job 终态
 //! 回填计量 [`BudgetScheduler::settle`](done=确认,error=退回预留,V1 骨架策略,
 //! Owner 知会项)。时钟经 [`Clock`] 注入,测试用假时钟,零真实 sleep。
+//!
+//! # 并发约束(Owner 裁定 2026-10-10)
+//! 本调度器按**单线程编排消费者**设计:同 Node 的 acquire/settle/persist 交错
+//! 调用可产生丢失更新(快照-写库非原子)。WP06 引入并发接线前,须先将
+//! [`BudgetScheduler::persist`] 改为持 state 锁贯穿写库。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -340,8 +346,12 @@ impl BudgetScheduler {
     }
 
     /// 429/503 反馈退避(卡内 ②):终点单调延长 = max(旧终点, now+基数),写穿
-    /// 持久化;重复反馈(连续限流)持续后移。
+    /// 持久化;重复反馈(连续限流)持续后移。**仅对有 profile 的 Node 生效**
+    /// (Owner 裁定 2026-10-10:无 profile Node 空操作,429/503 照常上浮)。
     pub fn backoff(&self, node: &str) -> Result<(), PartisyError> {
+        if !self.profiles.profiles.contains_key(node) {
+            return Ok(()); // 无 profile:不建行、不退避、不写库
+        }
         let now = self.clock.now_millis()?;
         let until = now.saturating_add(self.profiles.backoff.as_millis() as u64);
         {
@@ -416,6 +426,7 @@ impl BudgetScheduler {
     }
 
     /// 写穿:快照内存态 → budget_state upsert(行先于写消失 = 编程错误,Fatal)。
+    /// 单线程约束见模块注释(快照-写库非原子,并发交错可丢失更新;WP06 前改持锁贯穿)。
     fn persist(&self, node: &str) -> Result<(), PartisyError> {
         let (used, window, backoff) = {
             let state = self.lock_state()?;
@@ -675,19 +686,20 @@ mod tests {
     }
 
     #[test]
-    fn backoff_blocks_all_nodes_and_extends_monotonically() {
-        // 卡内 ②:退避武装后一切 Node Throttled(含无 profile);wait_until=max(窗
-        // 尾,退避终点);重复反馈自当前时刻延长;退避过点而窗口预算仍紧 → 仍等窗尾。
+    fn backoff_blocks_profiled_and_skips_unprofiled() {
+        // 卡内 ②(Owner 裁定 2026-10-10):退避仅武装有 profile 的 Node;无
+        // profile 空操作(不建行不退避,acquire 恒 Allow);wait_until=max(窗
+        // 尾,退避终点);重复反馈自当前时刻延长。
         let (scheduler, _path, clock) = scheduler_at("backoff", T0);
         let acq = |node: &str, cost| scheduler.acquire(node, cost).unwrap();
         assert_eq!(acq("testprov", 2), Decision::Allow);
         scheduler.backoff("testprov").unwrap();
-        scheduler.backoff("local:").unwrap();
+        scheduler.backoff("local:").unwrap(); // 无 profile:空操作
         assert_eq!(acq("testprov", 1), throttled(T0 + WINDOW_MS));
-        assert_eq!(acq("local:", 1), throttled(T0 + BACKOFF_MS));
+        assert_eq!(acq("local:", 1), Decision::Allow);
         clock.fetch_add(BACKOFF_MS / 2, Ordering::Relaxed);
-        scheduler.backoff("local:").unwrap();
-        assert_eq!(acq("local:", 1), throttled(T0 + BACKOFF_MS * 3 / 2));
+        scheduler.backoff("testprov").unwrap();
+        assert_eq!(acq("testprov", 1), throttled(T0 + WINDOW_MS));
         clock.fetch_add(BACKOFF_MS, Ordering::Relaxed); // 过退避点,窗口预算仍紧(2/3 用)
         assert_eq!(acq("testprov", 1), Decision::Allow);
         assert_eq!(acq("testprov", 2), throttled(T0 + WINDOW_MS));
@@ -695,17 +707,18 @@ mod tests {
 
     #[test]
     fn persistence_survives_reopen() {
-        // 卡内 ④:开桶重载——已计量/退避态经同库文件跨实例存活(重启不丢)。
+        // 卡内 ④:开桶重载——已计量/退避态经同库文件跨实例存活(重启不丢);
+        // 退避行使用有 profile 的 testprov(裁定后无 profile 不写库)。
         let (scheduler, path, _clock) = scheduler_at("persist", T0);
         scheduler.acquire("testprov", 2).unwrap();
-        scheduler.backoff("local:").unwrap();
+        scheduler.backoff("testprov").unwrap();
         drop(scheduler);
         let reloaded = BudgetScheduler::open_at(&path, test_profiles())
             .expect("reopen")
             .with_clock(Box::new(FakeClock::at(T0).0));
         let acq = |node: &str, cost| reloaded.acquire(node, cost).unwrap();
         assert_eq!(acq("testprov", 2), throttled(T0 + WINDOW_MS));
-        assert_eq!(acq("local:", 1), throttled(T0 + BACKOFF_MS));
+        assert_eq!(acq("local:", 1), Decision::Allow);
     }
 
     #[test]
