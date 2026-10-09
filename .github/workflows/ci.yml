@@ -1,0 +1,94 @@
+# CI 五门禁(M1-WP01-T03)。顺序:fmt → clippy(-D warnings)→ cargo test → pnpm build → cargo deny。
+# 范围裁定(任务卡附加裁定,2026-10-09):
+#   - cargo 三门禁作用域 = 根工作区(crates/partiverse-* + xtask,零第三方依赖基线)。
+#   - app/src-tauri 独立 workspace 暂不入 CI:存在 1 条既有 dead_code 警告
+#     (error.rs ErrorKind::Config/Internal,见 docs/reports/runs/M1-WP01-T02.md a2),
+#     -D warnings 下必致红,消除须改 app 源码(超出本卡文件清单),另行排期。
+#   - app/package.json 无 lint 脚本(scripts=dev/build/preview/tauri,2026-10-09 读文件实测),
+#     前端门禁仅 pnpm build(= tsc && vite build,tsc 即类型检查);lint 脚本补齐后须加入门禁。
+#   - CI 不接触任何真实云盘凭据(D34);不设任何门禁跳过。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同分支新 run 取代旧 run,省 runner 配额
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 唯一必需门禁 job(分支保护 required check 名 = "gates (linux)",见 .github/BRANCH_PROTECTION.md)。
+  gates:
+    name: gates (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # rust-toolchain.toml 钉 1.99.0(ADR-0001);该 action 省略 toolchain 输入时默认匹配 @rev(README 已核实),
+      # 故用版本化 ref 安装钉版,再显式补齐 rustfmt/clippy 组件(与钉版文件 components 一致)。
+      - name: 安装钉版工具链 1.99.0
+        uses: dtolnay/rust-toolchain@1.99.0
+      - name: 补齐 rustfmt/clippy 组件
+        run: rustup component add rustfmt clippy
+      - name: 缓存 cargo registry/git 与根工作区 target(actions/cache,键随 Cargo.lock 失效)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-linux-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-linux-
+      - name: 门禁 1/5 fmt
+        run: cargo fmt --all -- --check
+      - name: 门禁 2/5 clippy(-D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: 门禁 3/5 cargo test
+        run: cargo test --workspace
+      # pnpm 主版本与本地一致(12.10.1,pnpm-lock.yaml lockfileVersion 9.0);action 无法从
+      # packageManager 字段取版本(app/package.json 未声明),故显式给 version。
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 12
+      - name: 安装 Node 24(与本地 v24 一致;经 pnpm 缓存依赖)
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - name: 安装前端依赖(frozen-lockfile)
+        run: pnpm install --frozen-lockfile
+        working-directory: app
+      - name: 门禁 4/5 pnpm build(tsc + vite)
+        run: pnpm build
+        working-directory: app
+      # 官方 action,对仓库根 deny.toml 执行 cargo deny check(四节:licenses/bans/sources/advisories)。
+      - name: 门禁 5/5 cargo deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+  # 以下两个 Win/mac 编译冒烟 job 为 allowed-failure(任务卡显式标注):缺系统依赖或平台差异时不阻断合入。
+  # 跟进 issue 计划:连续 3 次全绿后由 Owner 开 issue 评估升级为必需门禁;D35 远端未建,issue 待远端
+  # 创建后登记,计划存档 docs/reports/runs/M1-WP01-T03.md。
+  # 编译冒烟仅根工作区(零第三方依赖,冷编译成本低),故不配缓存。
+  smoke-windows:
+    name: smoke (windows)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - run: cargo check --workspace
+  smoke-macos:
+    name: smoke (macos)
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - run: cargo check --workspace
