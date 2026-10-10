@@ -1,12 +1,19 @@
 // 浏览视图编排(DoD①②③④⑥):面包屑+排序(默认修改时间倒序)+前缀筛选 chips+
 // 列表/网格两态+四态框架(空/骨架/错误可重试/成功,禁空白沉默)+可收起详情面板
-// 骨架(Particle/驻留文案预留)。传输条/搜索/预览不在本卡(壳位已有)。
+// 骨架(Particle/驻留文案预留)。M1-WP06-T02 接线:操作行(新建目录/传输/删除)
+// + 预览-提交/确认对话框(破坏性操作禁直通;传输经传输 store,重试元数据随
+// store 存活)。跨 Node 语境话术=「整理/备份」(合规红线,禁「迁移/搬运」)。
 import { useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { commands } from "@/bindings";
 import { Button } from "@/components/ui/button";
 import { BrowseTreeGrid } from "@/components/browse/BrowseTreeGrid";
+import { DeleteConfirm, FolderDialog, TransferDialog } from "@/components/browse/TransferDialog";
 import { LOCAL_NODE, useBrowse } from "@/lib/browse/useBrowse";
 import { formatBytes, formatMtime, type BrowseEntry, type SortKey } from "@/lib/browse/model";
+import { composeFs } from "@/lib/transfer/model";
+import { useTransfers } from "@/lib/transfer/useTransfers";
+import type { TransferEntry } from "@/lib/transfer/model";
 import { t } from "@/i18n";
 
 const SORT_KEYS: SortKey[] = ["name", "size", "mtime"];
@@ -121,10 +128,23 @@ function DetailPanel({ entry, open, onToggle }: { entry: BrowseEntry | null; ope
 
 export function BrowseView() {
   const browse = useBrowse(LOCAL_NODE);
+  const transfers = useTransfers();
   const [view, setView] = useState<"list" | "grid">("list");
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [selected, setSelected] = useState<BrowseEntry | null>(null);
   const [chipDraft, setChipDraft] = useState("");
+  // T02 操作面:传输(预览-提交)/新建目录/删除确认三对话框互斥开合。
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [folderOpen, setFolderOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+
+  const toEntry = (entry: BrowseEntry): TransferEntry => ({
+    id: entry.id, name: entry.name, isDir: entry.isDir, sizeBytes: entry.sizeBytes,
+  });
+
+  const submitMetas = async (metas: Parameters<typeof transfers.submit>[0][]): Promise<void> => {
+    for (const meta of metas) await transfers.submit(meta);
+  };
 
   return (
     <main className="flex min-h-0 flex-1 flex-col">
@@ -156,6 +176,29 @@ export function BrowseView() {
             <span aria-hidden>{browse.sort.desc ? "↓" : "↑"}</span>
           </Button>
         </div>
+      </div>
+
+      {/* T02 操作行:破坏性/跨 Node 操作一律经预览-提交对话框,禁直通。
+          单文件删除引擎白名单无对应命令(fs_delete 语义=目录树),显式禁用+说明。 */}
+      <div className="flex shrink-0 items-center gap-1 border-b px-3 py-1.5" role="toolbar" aria-label={t("actions.toolbarLabel")}>
+        <Button variant="ghost" size="sm" onClick={() => setFolderOpen(true)}>{t("actions.newFolder")}</Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={selected === null}
+          onClick={() => setTransferOpen(true)}
+        >
+          {t("actions.transfer")}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={selected === null || selected.isDir === false}
+          title={selected !== null && selected.isDir === false ? t("actions.deleteFileUnavailable") : undefined}
+          onClick={() => setDeleteOpen(true)}
+        >
+          {t("actions.delete")}
+        </Button>
       </div>
 
       <div className="flex shrink-0 flex-wrap items-center gap-1 border-b px-3 py-1.5">
@@ -237,6 +280,48 @@ export function BrowseView() {
           </>
         )}
       </div>
+
+      {/* T02 对话框:传输=预览-提交(冲突策略);删除=确认(引擎删除语义如实
+          展示);新建目录=名称输入。成功后重载当前目录(loadDir 直拉,破缓存)。 */}
+      <TransferDialog
+        open={transferOpen}
+        isMove={false}
+        entries={selected !== null ? [toEntry(selected)] : []}
+        srcRoot={browse.rootPath}
+        node={LOCAL_NODE.label}
+        onClose={() => setTransferOpen(false)}
+        onSubmit={(metas) => submitMetas(metas)}
+      />
+      <FolderDialog
+        open={folderOpen}
+        srcRoot={browse.rootPath}
+        node={LOCAL_NODE.label}
+        onClose={() => setFolderOpen(false)}
+        onCreate={(fs, remote) =>
+          commands.fsMkdir(LOCAL_NODE.label, fs, remote, 1).then((result) => {
+            if (result.status === "error") throw new Error(`${result.error.kind}: ${result.error.msg}`);
+            if (result.data !== "applied") {
+              throw new Error(result.data === "exhausted" ? t("transfers.exhausted") : t("transfers.state.throttled"));
+            }
+            return browse.retry();
+          })
+        }
+      />
+      <DeleteConfirm
+        open={deleteOpen}
+        targetFs={selected !== null ? composeFs(browse.rootPath, selected.name) : browse.rootPath}
+        node={LOCAL_NODE.label}
+        onClose={() => setDeleteOpen(false)}
+        onDelete={(fs) =>
+          commands.fsDelete(LOCAL_NODE.label, fs, 1).then((result) => {
+            if (result.status === "error") throw new Error(`${result.error.kind}: ${result.error.msg}`);
+            if (result.data !== "applied") {
+              throw new Error(result.data === "exhausted" ? t("transfers.exhausted") : t("transfers.state.throttled"));
+            }
+            return browse.retry();
+          })
+        }
+      />
     </main>
   );
 }

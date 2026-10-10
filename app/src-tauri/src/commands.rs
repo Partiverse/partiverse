@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-use partiverse_core::budget::JobSpec;
-use partiverse_core::jobs::RcDispatch;
+use partiverse_core::budget::{Decision, GatedSubmit, JobSpec};
+use partiverse_core::jobs::{JobStatus, RcDispatch};
 use partiverse_core::oauth::{BaiduOAuthFlow, ClientCredentials, OAuthTokenSink};
 use partiverse_engine::slots::{EngineSlotConfig, DEFAULT_SLOT_ID};
 use serde_json::Value;
@@ -14,7 +14,8 @@ use serde_json::Value;
 use tauri::{AppHandle, State, Wry};
 
 use crate::dto::{
-    BudgetDecision, EngineSnapshot, GatedSubmitOut, JobPollOut, JobRecordOut, ProviderFormOut,
+    BudgetDecision, EngineSnapshot, FsOpOutcomeOut, GatedSubmitOut, JobPollOut, JobRecordOut,
+    JobRetryOut, JobStatusOut, ProviderFormOut,
 };
 use crate::error::{CmdError, ErrorKind, Severity};
 use crate::state::{lock, InMemoryTokenSink, ShellState};
@@ -234,16 +235,176 @@ pub async fn job_submit(
     .await
 }
 
-/// 轮询单个 job(job/status 观测推进状态机;终态幂等不再触引擎)。
+/// 轮询单个 job(M1-WP06-T02 升级:core `poll_with_progress`——job/status 推进
+/// 状态机 + running 带锚行顺带 core/stats 组采样落进度列;终态/停放行零引擎
+/// 触达,采样缺失不落列,采样失败结构化上浮)。
 #[tauri::command]
 #[specta::specta]
 pub async fn job_poll(state: State<'_, ShellState>, id: String) -> Result<JobPollOut, CmdError> {
     let jobs = Arc::clone(&state.jobs);
     let dispatch = state.dispatch()?;
     run_blocking(move || {
-        jobs.poll(&dispatch, &id)
+        partiverse_core::fsops::poll_with_progress(&jobs, &dispatch, &id)
             .map_err(CmdError::from)
             .map(JobPollOut::from)
+    })
+    .await
+}
+
+/// 公开任务清单(M1-WP06-T02 卡内 ③):status 过滤(None = 全量),按
+/// created_at, id 稳定序;传输队列面板单源。
+#[tauri::command]
+#[specta::specta]
+pub async fn job_list(
+    state: State<'_, ShellState>,
+    status: Option<JobStatusOut>,
+) -> Result<Vec<JobRecordOut>, CmdError> {
+    let jobs = Arc::clone(&state.jobs);
+    run_blocking(move || {
+        let records = jobs.list_jobs(status.map(JobStatusOut::to_core))?;
+        Ok(records.into_iter().map(JobRecordOut::from).collect())
+    })
+    .await
+}
+
+/// 取消 job(core `job_cancel`:带锚行 job/stop + 终态裁决 error/user_canceled/
+/// Interrupted;终态行取消 = 非法迁移 Fatal)。
+#[tauri::command]
+#[specta::specta]
+pub async fn job_cancel(
+    state: State<'_, ShellState>,
+    id: String,
+) -> Result<JobRecordOut, CmdError> {
+    let jobs = Arc::clone(&state.jobs);
+    let dispatch = state.dispatch()?;
+    run_blocking(move || {
+        jobs.job_cancel(&dispatch, &id)
+            .map_err(CmdError::from)
+            .map(JobRecordOut::from)
+    })
+    .await
+}
+
+/// 重试 job(M1-WP06-T02 卡内 ③;编排层重试退避/re-acquire 执行点):
+/// 停放行(queued 无锚,预算 Exhausted/自动回队/提交窗残留)→ 预算 re-acquire
+/// 前置,Allow 即 `revive_parked` 原地复活(同 id,清上次失败标注);error 终态
+/// 行(重试超限/Fatal/用户取消,终态零出边)→ 预算门提交**新** job(元数据由
+/// 调用方照首次提交原样供给,行内不落 params,红线 3;旧行留痕);其余状态
+/// (running/done/带锚 queued)拒绝 Fatal,零出边。
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::too_many_arguments)]
+pub async fn job_retry(
+    state: State<'_, ShellState>,
+    id: String,
+    node: String,
+    method: String,
+    kind: String,
+    src: String,
+    dst: String,
+    params: String,
+    cost: u32,
+) -> Result<JobRetryOut, CmdError> {
+    let budget = Arc::clone(&state.budget);
+    let jobs = Arc::clone(&state.jobs);
+    let dispatch = state.dispatch()?;
+    run_blocking(move || {
+        let params: Value = serde_json::from_str(&params).map_err(|err| {
+            CmdError::new(
+                ErrorKind::Internal,
+                Severity::Fatal,
+                format!("job_retry: params must be valid JSON text: {err}"),
+            )
+        })?;
+        let record = jobs.get(&id).map_err(CmdError::from)?;
+        let cost = u64::from(cost);
+        match record.status {
+            JobStatus::Queued if record.engine_job_id.is_none() => {
+                match budget.acquire(&node, cost).map_err(CmdError::from)? {
+                    Decision::Allow => Ok(JobRetryOut::Revived(JobRecordOut::from(
+                        jobs.revive_parked(&dispatch, &id, &method, &params)
+                            .map_err(CmdError::from)?,
+                    ))),
+                    Decision::Throttled { wait_until_ms } => {
+                        Ok(JobRetryOut::Throttled { wait_until_ms })
+                    }
+                    Decision::Exhausted => Ok(JobRetryOut::Exhausted(JobRecordOut::from(
+                        jobs.get(&id).map_err(CmdError::from)?,
+                    ))),
+                }
+            }
+            JobStatus::Error => {
+                let spec = JobSpec {
+                    method: &method,
+                    kind: &kind,
+                    src: &src,
+                    dst: &dst,
+                    params: &params,
+                };
+                match budget
+                    .gated_submit(&jobs, &dispatch, &node, cost, spec)
+                    .map_err(CmdError::from)?
+                {
+                    GatedSubmit::Submitted(record) => {
+                        Ok(JobRetryOut::Submitted(JobRecordOut::from(record)))
+                    }
+                    GatedSubmit::Throttled { wait_until_ms } => {
+                        Ok(JobRetryOut::Throttled { wait_until_ms })
+                    }
+                    GatedSubmit::Exhausted(record) => {
+                        Ok(JobRetryOut::Exhausted(JobRecordOut::from(record)))
+                    }
+                }
+            }
+            other => Err(CmdError::new(
+                ErrorKind::Core,
+                Severity::Fatal,
+                format!("job `{id}` is not retryable in status `{}`", other.as_str()),
+            )),
+        }
+    })
+    .await
+}
+
+/// 新建目录(M1-WP06-T02 卡内 ③):core `fsops::fs_mkdir`(预算 acquire 前置,
+/// rc `operations/mkdir` 双参数实测形状);Throttled/Exhausted 零引擎触达原样
+/// 上浮,由前端择时重试。
+#[tauri::command]
+#[specta::specta]
+pub async fn fs_mkdir(
+    state: State<'_, ShellState>,
+    node: String,
+    fs: String,
+    remote: String,
+    cost: u32,
+) -> Result<FsOpOutcomeOut, CmdError> {
+    let budget = Arc::clone(&state.budget);
+    let dispatch = state.dispatch()?;
+    run_blocking(move || {
+        partiverse_core::fsops::fs_mkdir(&budget, &dispatch, &node, &fs, &remote, u64::from(cost))
+            .map_err(CmdError::from)
+            .map(FsOpOutcomeOut::from)
+    })
+    .await
+}
+
+/// 删除目录树文件(M1-WP06-T02 卡内 ③):core `fsops::fs_delete`(rc
+/// `operations/delete`,实测语义 = 递归删除该目录树下全部文件、保留目录壳;
+/// 指向文件 = 引擎 500 原样上浮)。前端必须预览-提交(破坏性操作禁直通)。
+#[tauri::command]
+#[specta::specta]
+pub async fn fs_delete(
+    state: State<'_, ShellState>,
+    node: String,
+    fs: String,
+    cost: u32,
+) -> Result<FsOpOutcomeOut, CmdError> {
+    let budget = Arc::clone(&state.budget);
+    let dispatch = state.dispatch()?;
+    run_blocking(move || {
+        partiverse_core::fsops::fs_delete(&budget, &dispatch, &node, &fs, u64::from(cost))
+            .map_err(CmdError::from)
+            .map(FsOpOutcomeOut::from)
     })
     .await
 }
