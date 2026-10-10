@@ -23,5 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 
-# tauri-specta 生成的 IPC 绑定(生成物不入库;debug 启动或 `cargo test` 时导出)
-/src/bindings.ts
+# tauri-specta 生成的 IPC 绑定——M1-WP05-T01 起入库:前端(tsc/vite)与 CI 依赖
+# 该文件存在(WP01「不入库」决策与 App.tsx 消费断裂,PR #26 实证);变更经
+# `cargo test`(src-tauri)再生成,漂移由代码评审把关(CI 生成步校验待排期)。
+# /src/bindings.ts

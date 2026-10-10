@@ -1,16 +1,33 @@
-//! Partiverse 桌面壳(Tauri 2 应用壳,M1-WP01-T02)。
+//! Partiverse 桌面壳(Tauri 2 应用壳,M1-WP01-T02 骨架;M1-WP05-T01 数据接线)。
 //!
-//! 职责边界:壳层装配 + specta IPC 类型管道;sidecar 引擎管理属 WP02,
-//! 业务功能一律不在本卡范围(docs/tasks/M1-WP01-T02.md)。
+//! 职责边界:壳层装配 + specta IPC 类型管道 + 命令面透传;业务逻辑一律在
+//! crates(见 state.rs/commands.rs 纪律注),window_state 为搬运件
+//! (docs/adr/0008-wp05-frontend-dependencies.md 声明,本卡未接线窗口事件)。
 
 mod commands;
+mod dto;
 mod error;
+mod state;
+pub mod window_state;
+
+use state::ShellState;
 
 /// 组装 IPC 命令面:注册命令并产出可导出的 specta Builder。
 /// 启动路径与绑定导出测试共用同一构造,保证「命令 ↔ 生成绑定」单一事实源。
 fn ipc_builder() -> tauri_specta::Builder<tauri::Wry> {
-    tauri_specta::Builder::<tauri::Wry>::new()
-        .commands(tauri_specta::collect_commands![commands::app_version,])
+    tauri_specta::Builder::<tauri::Wry>::new().commands(tauri_specta::collect_commands![
+        commands::app_version,
+        commands::engine_ensure,
+        commands::engine_status,
+        commands::engine_shutdown,
+        commands::providers_fetch,
+        commands::connection_create_123,
+        commands::operations_list,
+        commands::budget_acquire,
+        commands::job_submit,
+        commands::job_poll,
+        commands::jobs_reconcile,
+    ])
 }
 
 /// 导出 TS IPC 绑定到前端 `src/bindings.ts`(生成物,不入库)。
@@ -35,6 +52,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     export_bindings(&builder)?;
 
     tauri::Builder::default()
+        // 壳共享状态(jobs/预算器开库、协调器构造失败即启动失败,零静默)。
+        .manage(ShellState::new()?)
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
