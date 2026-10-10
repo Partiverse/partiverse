@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
@@ -9,6 +9,13 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vite.dev/config/
 export default defineConfig(() => ({
   plugins: [react(), tailwindcss()],
+
+  // vitest 基建(M1-WP05-T01:纯逻辑单测面;视觉断言不做,卡片 DoD④):
+  // jsdom 提供 DOM,测试文件随 src 同目录就近放置。
+  test: {
+    environment: "jsdom",
+    include: ["src/**/*.test.{ts,tsx}"],
+  },
 
   // shadcn/ui 基座要求:@ 别名指向 src/
   resolve: {

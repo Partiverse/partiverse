@@ -21,13 +21,18 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["specta"] }
 serde = { version = "1", features = ["derive"] }
 # tauri-specta rc.25 精确钉版要求 specta =2.0.0-rc.25(见其 crates.io 元数据)。
+# 注:serde_json 特性(Value 的 Type 实现)经实测不可用于 IPC 面——Value 为
+# 递归内联类型,导出期无限递归栈溢出(128MB 栈仍溢,M1-WP05-T01);本卡裁定
+# 动态 JSON 载荷一律以 JSON 文本 String 过线(前端 JSON.parse),零 schema 发明。
 specta = { version = "=2.0.0-rc.25", features = ["derive"] }
 # Typescript 导出配置按名导入;0.0.x 版本与 tauri-specta 的 ^0.0.12 要求重合。
 specta-typescript = "=0.0.12"
 tauri-specta = { version = "=2.0.0-rc.25", features = ["typescript"] }
-
-# 仅测试用:断言 CmdError 的 {kind,msg} IPC 线格式。
-[dev-dependencies]
+# 业务零入壳(M1-WP05-T01):两 crate 已有件,壳只做参数透传与错误映射
+# (引擎生命周期/预算/JobManager/rc 白名单客户端全部在 crates 内)。
+partiverse-core = { path = "../../crates/partiverse-core", version = "0.1.0" }
+partiverse-engine = { path = "../../crates/partiverse-engine", version = "0.1.0" }
+# window_state 持久化(M1-WP05-T01 搬运件)生产读写路径消费。
 serde_json = "1"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
