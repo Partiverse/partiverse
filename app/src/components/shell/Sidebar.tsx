@@ -1,7 +1,8 @@
-// 侧栏(静态骨架,无数据):分区锚点结构自 V1 一次到位(08 规划 §10.1)。
+// 侧栏:分区锚点结构自 V1 一次到位(08 规划 §10.1)+ 引擎健康徽标常驻(M1-WP05-T02)。
 // 分区 = Nodes(本地/网盘/协议分组头)+ 预留组「设备与团队」+「场景库」锚点。
-// 文案全部走 i18n 资源(仅英文);无任何业务行为。
+// 文案全部走 i18n 资源(仅英文);除健康徽标入口外无业务行为。
 import { Button } from "@/components/ui/button";
+import { EngineHealthBadge } from "@/components/shell/EngineHealthBadge";
 import { t } from "@/i18n";
 
 function GroupHeader({ label }: { label: string }) {
@@ -25,7 +26,7 @@ function SceneEntry({ label }: { label: string }) {
   );
 }
 
-export function Sidebar() {
+export function Sidebar({ onOpenDiagnostics }: { onOpenDiagnostics: () => void }) {
   return (
     <aside className="flex w-60 shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
       <div className="flex items-center gap-2 px-4 py-3">
@@ -55,6 +56,10 @@ export function Sidebar() {
         <SceneEntry label={t("sidebar.sceneDocs")} />
       </nav>
 
+      {/* 引擎健康徽标(DoD⑤):常驻三态;点击 = 诊断面板占位路由 */}
+      <div className="border-t border-sidebar-border p-2">
+        <EngineHealthBadge onOpen={onOpenDiagnostics} />
+      </div>
       <div className="border-t border-sidebar-border p-3">
         <Button variant="outline" size="sm" className="w-full" disabled>
           {t("sidebar.addNode")}

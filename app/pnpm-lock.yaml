@@ -60,6 +60,9 @@ importers:
         specifier: ^4.6.5
         version: 4.6.5
     devDependencies:
+      '@tanstack/table-core':
+        specifier: 9.2.8
+        version: 9.2.8
       '@tauri-apps/cli':
         specifier: ^2
         version: 2.12.1
