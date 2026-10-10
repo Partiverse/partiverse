@@ -638,7 +638,7 @@ mod tests {
             "重建失败行零改动"
         );
         // 重取失败:severity 保真上浮(Retryable),行保持 error 终态可再救援。
-        struct FakeFakeFailingRefetch;
+        struct FakeFailingRefetch;
         impl DlinkRefetch for FakeFailingRefetch {
             fn refetch_dlink(&self, _target: &str) -> Result<String, PartisyError> {
                 Err(PartisyError::new(Sev::Retryable))
