@@ -13,6 +13,11 @@ publish = false
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 # rc 载荷参数面(ADR-0006;与 engine 同版本单源)。
 serde_json = "1.0.151"
+# 表单字段描述模型的 serde 结构(M1-WP04-T03):1.0.229 = 锁树既有版本
+# (partiverse-engine 直依赖同版单源,零新增包/零新增版本);derive 特性的
+# serde_derive 亦已在锁树内(serde 1.0.229 依赖边),仅服务本卡模型反序列化
+# 与 WP05 向导渲染/IPC 序列化。
+serde = { version = "1.0.229", features = ["derive"] }
 # OS keychain(M1-WP04-T01,ADR-0007):keyring 2.3.3 单 API 覆盖三平台后端——
 # linux=内核 keyring(linux-default-keyutils,纯 Rust 零系统包/零 D-Bus 守护进程
 # 依赖,headless 可用);windows=Credential Manager(windows-sys ^0.52,与树内
