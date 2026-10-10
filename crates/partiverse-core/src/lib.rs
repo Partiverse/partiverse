@@ -8,6 +8,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod budget;
 pub mod caps;
+// 模块名 credential_store(而非 credentials):仓库 .gitignore 既有 `credentials*`
+// 反密钥入库模式会吞掉 credentials.rs 致其永远无法提交,改名绕开(M1-WP04-T01)。
+pub mod credential_store;
 pub mod error;
 pub mod jobs;
 
