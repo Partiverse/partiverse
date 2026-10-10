@@ -94,7 +94,10 @@ export function redactValues(fields: FieldDesc[], values: Record<string, unknown
 }
 
 /** 创建通道守卫:仅 pan123 分支有已交付 IPC 通道(T01 connection_create_123);其余返回
- *  null,调用方必须显式上浮「通道未交付」错误态(禁静默/禁伪造成功)。 */
+ *  null,调用方必须显式上浮「通道未交付」错误态(禁静默/禁伪造成功)。
+ *  baidu 分支保持 null(M1-WP05-T08 Owner 裁定 2026-10-10):壳命令 baidu_exchange_code
+ *  已交付(真实换码),但引擎钉定 rclone v1.75.1 无 baidu backend,接线后换码必然后续失败
+ *  且徒耗一次性授权 code——向导接线待 backends-go 百度后端落地(另立卡)。 */
 export function createChannel(branch: WizardBranch): "connection_create_123" | null {
   return branch === "pan123" ? "connection_create_123" : null;
 }

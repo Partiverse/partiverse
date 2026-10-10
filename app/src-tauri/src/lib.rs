@@ -22,6 +22,7 @@ fn ipc_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::engine_shutdown,
         commands::providers_fetch,
         commands::connection_create_123,
+        commands::baidu_exchange_code,
         commands::operations_list,
         commands::budget_acquire,
         commands::job_submit,
