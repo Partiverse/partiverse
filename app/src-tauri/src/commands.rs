@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use partiverse_core::budget::JobSpec;
 use partiverse_core::jobs::RcDispatch;
+use partiverse_core::oauth::{BaiduOAuthFlow, ClientCredentials, OAuthTokenSink};
 use partiverse_engine::slots::{EngineSlotConfig, DEFAULT_SLOT_ID};
 use serde_json::Value;
 // `package_info` 在 Tauri 2 里是 AppHandle 的固有方法,无需 Manager trait(cargo check 实证)。
@@ -16,7 +17,7 @@ use crate::dto::{
     BudgetDecision, EngineSnapshot, GatedSubmitOut, JobPollOut, JobRecordOut, ProviderFormOut,
 };
 use crate::error::{CmdError, ErrorKind, Severity};
-use crate::state::{lock, ShellState};
+use crate::state::{lock, InMemoryTokenSink, ShellState};
 
 /// 同步阻塞任务包装(ADR-0004 口径);join 失败(任务 panic)= Fatal 上浮。
 async fn run_blocking<T, F>(task: F) -> Result<T, CmdError>
@@ -122,6 +123,36 @@ pub async fn connection_create_123(
         let remote =
             partiverse_core::pan123::webdav_remote(&name, &endpoint, &account, &app_password)?;
         partiverse_core::schema::create_remote(&dispatch, &remote)?;
+        Ok(())
+    })
+    .await
+}
+
+/// 百度 oob 式本地换码(M1-WP05-T08,R2 凭据钉子):code/state + client 凭据
+/// 全部由前端注入(用户侧自建应用,禁硬编码/禁日志),经 core
+/// `BaiduOAuthFlow::exchange_code` 在本机 GET 官方 token 端点换码(code 换
+/// token 必须本地完成,凭据零过服务器);token 经 `OAuthTokenSink` 口径交壳面
+/// 过渡件 [`InMemoryTokenSink`]——仅保留进程内存,零落盘零日志,零 token 数据
+/// 回线(返回值恒 `()`)。加密 config 最终落点沿 T02 口径延后:引擎钉定
+/// rclone v1.75.1 无 baidu backend(实测 `config/create` 500),待 backends-go
+/// 百度后端落地后另立卡接线;沙箱提示与向导接线同期(向导守卫暂保持
+/// channelUnavailable 上浮,Owner 裁定 2026-10-10)。
+#[tauri::command]
+#[specta::specta]
+pub async fn baidu_exchange_code(
+    state: State<'_, ShellState>,
+    client_id: String,
+    client_secret: String,
+    code: String,
+    oauth_state: String,
+) -> Result<(), CmdError> {
+    let slot = Arc::clone(&state.token_slot);
+    run_blocking(move || {
+        // 凭据非空校验在 core(空白 → ClientCredentialsMissing 引导错误,Fatal);
+        // state 为 oob 回填路径的会话比对值(core 校验非空,不入 token 请求)。
+        let credentials = ClientCredentials::new(client_id, client_secret)?;
+        let token = BaiduOAuthFlow::new(credentials).exchange_code(&code, &oauth_state)?;
+        InMemoryTokenSink::new(slot).store_token(&token)?;
         Ok(())
     })
     .await

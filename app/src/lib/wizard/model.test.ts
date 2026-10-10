@@ -2,7 +2,7 @@
 // 创建通道守卫 / 文案 key 全部可解析(缺 key 抛错=测试失败)。
 import { describe, expect, it } from "vitest";
 
-import type { FieldDesc } from "@/bindings";
+import { commands, type FieldDesc } from "@/bindings";
 import { t } from "@/i18n";
 import {
   aggregateProbe, BAIDU_SANDBOX_NOTICE_KEY, branchGroupKey, branchGuidanceKeys, buildDefaultValues,
@@ -73,6 +73,17 @@ describe("创建通道守卫", () => {
     expect(PAN123_FIELDS.map((f) => f.name)).toEqual(["name", "endpoint", "account", "app_password"]);
     expect(PAN123_FIELDS.every((f) => f.required)).toBe(true);
     expect(PAN123_FIELDS.find((f) => f.is_password)?.name).toBe("app_password");
+  });
+});
+
+describe("百度换码通道过渡契约(M1-WP05-T08 Owner 裁定)", () => {
+  it("壳命令 baidu_exchange_code 已入 bindings(T01 口径入库,签名四参数全前端注入)", () => {
+    expect(typeof commands.baiduExchangeCode).toBe("function");
+  });
+
+  it("向导守卫在 backends-go 百度后端落地前不接 baidu 换码(接线必徒耗一次性 code,保持显式上浮)", () => {
+    expect(createChannel("baidu")).toBeNull();
+    expect(createChannel("baidu")).not.toBe("baidu_exchange_code");
   });
 });
 

@@ -31,6 +31,18 @@ export const commands = {
 	 */
 	connectionCreate123: (name: string, endpoint: string, account: string, appPassword: string) => typedError<null, CmdError>(__TAURI_INVOKE("connection_create_123", { name, endpoint, account, appPassword })),
 	/**
+	 *  百度 oob 式本地换码(M1-WP05-T08,R2 凭据钉子):code/state + client 凭据
+	 *  全部由前端注入(用户侧自建应用,禁硬编码/禁日志),经 core
+	 *  `BaiduOAuthFlow::exchange_code` 在本机 GET 官方 token 端点换码(code 换
+	 *  token 必须本地完成,凭据零过服务器);token 经 `OAuthTokenSink` 口径交壳面
+	 *  过渡件 [`InMemoryTokenSink`]——仅保留进程内存,零落盘零日志,零 token 数据
+	 *  回线(返回值恒 `()`)。加密 config 最终落点沿 T02 口径延后:引擎钉定
+	 *  rclone v1.75.1 无 baidu backend(实测 `config/create` 500),待 backends-go
+	 *  百度后端落地后另立卡接线;沙箱提示与向导接线同期(向导守卫暂保持
+	 *  channelUnavailable 上浮,Owner 裁定 2026-10-10)。
+	 */
+	baiduExchangeCode: (clientId: string, clientSecret: string, code: string, oauthState: string) => typedError<null, CmdError>(__TAURI_INVOKE("baidu_exchange_code", { clientId, clientSecret, code, oauthState })),
+	/**
 	 *  浏览数据源:rc 白名单 `operations/list` 单目录列举(fs = "remote:path");
 	 *  载荷 JSON 文本原样透传(壳零字段裁剪、零 schema 发明;理由见 dto.rs)。
 	 */
