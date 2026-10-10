@@ -316,6 +316,7 @@ dependencies = [
  "keyring",
  "partiverse-engine",
  "rusqlite",
+ "serde",
  "serde_json",
  "ureq",
 ]
