@@ -10,5 +10,5 @@
      - 采样哈希是过渡件,V2 整体移交 partisync cas(D27);blake3 的性能优势(并行/长输入)在「头64KiB+尾64KiB」≤128KiB 输入上不可见。
      - sha2 0.11 已被 ADR-0004 裁定入树,零新增版本;采样指纹在本卡语义是**变更检测指纹**(非长期内容承诺),算法品牌无外部兼容约束。
 - 商业授权核查: sha2/proptest 均 MIT OR Apache-2.0 双授权,无付费许可/年费/审核费/主体证书条款;商业授权审计表无需新增行(审计表只收录含商业授权风险的依赖)。
-- 证据(全部本机 2026-10-11 实测,非记忆):`cargo tree -i sha2@0.11.0` = partiverse-engine [dev-dependencies] 单边;`grep proptest Cargo.lock` 加依赖前零命中;`cargo deny check` 加依赖后四节绿(bans/licenses/sources/advisories);`cargo tree -p partiverse-core` 确认 sha2 进普通依赖、proptest 仅 dev。
+- 证据(全部本机 2026-10-11 实测,非记忆):`cargo tree -i sha2@0.11.0` = partiverse-engine 普通依赖 + partiverse-core 新增边两条(审查 [low] 勘误:原记「dev-dependencies 单边」系误读逆树标签,结论不受影响——0.11.0 锁树既有、零新增版本);`grep proptest Cargo.lock` 加依赖前零命中;`cargo deny check` 加依赖后四节绿(bans/licenses/sources/advisories);`cargo tree -p partiverse-core` 确认 sha2 进普通依赖、proptest 仅 dev。
 - 影响: 正向=校验链零新增版本即得密码学原语;性质测试有卡点名框架。代价=①proptest 传递树进 dev 锁面(仅测试目标,不进生产二进制);②sha2 升级跟随 RustCrypto 0.11 线;③采样指纹算法前缀 `partiverse-sample-v1` 一经落库即冻结,后续改算法须换前缀版本号。
