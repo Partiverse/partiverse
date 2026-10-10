@@ -1,5 +1,6 @@
 // 应用壳入口:侧栏/工具行/传输条骨架 + 浏览视图 + 占位路由(browse/诊断,DoD⑤)。
 // M1-WP05-T01:specta 强类型 IPC;T02:诊断面板占位路由(仅快照+最近错误)。
+// T03:⌘K 命令面板(三区)+ 添加 Node 向导入口(侧栏/面板命令共用)。
 import { useEffect, useState } from "react";
 import { commands } from "@/bindings";
 import { Sidebar } from "@/components/shell/Sidebar";
@@ -7,6 +8,8 @@ import { Toolbar, type IpcState } from "@/components/shell/Toolbar";
 import { useEngineStatus } from "@/components/shell/EngineHealthBadge";
 import { BrowseView } from "@/components/browse/BrowseView";
 import { TransferBar } from "@/components/shell/TransferBar";
+import { AddNodeWizard } from "@/components/wizard/AddNodeWizard";
+import { CommandPalette } from "@/components/cmdk/CommandPalette";
 import { useLastEngineError } from "@/lib/healthStore";
 import { t } from "@/i18n";
 
@@ -47,6 +50,20 @@ function DiagnosticsPanel({ onBack }: { onBack: () => void }) {
 function App() {
   const [ipc, setIpc] = useState<IpcState>({ kind: "loading" });
   const [route, setRoute] = useState<Route>("browse");
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
+  // ⌘K / Ctrl+K 全局热键(DoD④):切换命令面板;浏览器默认行为(如保存)一并阻止。
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setPaletteOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,13 +88,19 @@ function App() {
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
       <div className="flex min-h-0 flex-1">
-        <Sidebar onOpenDiagnostics={() => setRoute("diagnostics")} />
+        <Sidebar onOpenDiagnostics={() => setRoute("diagnostics")} onAddNode={() => setWizardOpen(true)} />
         <div className="flex min-w-0 flex-1 flex-col">
           <Toolbar ipc={ipc} />
           {route === "browse" ? <BrowseView /> : <DiagnosticsPanel onBack={() => setRoute("browse")} />}
           <TransferBar />
         </div>
       </div>
+      <AddNodeWizard open={wizardOpen} onClose={() => setWizardOpen(false)} />
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} actions={{
+        onAddNode: () => setWizardOpen(true),
+        onOpenDiagnostics: () => setRoute("diagnostics"),
+        onBrowse: () => setRoute("browse"),
+      }} />
     </div>
   );
 }

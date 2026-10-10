@@ -5,11 +5,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { commands, type CmdError } from "@/bindings";
 import { recordEngineError } from "@/lib/healthStore";
+import { publishPaletteSource } from "@/lib/cmdk/sourceStore";
+import { formatBytes } from "@/lib/browse/model";
 import {
   buildTreeData, compareEntries, DEFAULT_SORT, deriveBrowsePhase,
   matchesChips, normalizeChip, parseDirListing,
   type BrowseEntry, type BrowseItem, type BrowsePhase, type DirState, type SortSpec,
 } from "@/lib/browse/model";
+import { t } from "@/i18n";
 
 export interface BrowseNode {
   label: string;
@@ -72,6 +75,15 @@ export function useBrowse(node: BrowseNode): BrowseController {
         if (result.status === "error") throw new Error(envelopeError(result.error));
         const parsed = parseDirListing(result.data, path, node.label);
         if (!parsed.ok) throw new Error(parsed.error);
+        // T03 ⌘K「文件」区数据源:列举成功即发布当前目录条目(仅文件名/大小元数据)。
+        publishPaletteSource({
+          nodeLabel: node.label,
+          path,
+          files: parsed.entries.map((entry) => ({
+            id: entry.id, zone: "files" as const, label: entry.name,
+            detail: entry.isDir ? t("browse.directory") : formatBytes(entry.sizeBytes),
+          })),
+        });
         setDirs((prev) => ({ ...prev, [path]: { status: "ready", entries: parsed.entries, error: null } }));
       } catch (err) {
         const message = errorText(err);
