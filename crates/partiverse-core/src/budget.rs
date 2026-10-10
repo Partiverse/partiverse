@@ -11,14 +11,17 @@
 //! `config/quota-profiles.default.json`(内置默认,provider 事实带 source 键)+
 //! 用户配置目录 `partiverse/quota-profiles.json` 覆盖,禁止硬编码进 .rs。接缝:
 //! [`BudgetScheduler::gated_submit`] submit 前置 acquire,Exhausted 经
-//! [`JobManager::register_queued`] 留 queued 零引擎触达(复活属 WP06);job 终态
+//! [`JobManager::register_queued`] 留 queued 零引擎触达(复活走
+//! `JobManager::revive_parked`,M1-WP06-T01);job 终态
 //! 回填计量 [`BudgetScheduler::settle`](done=确认,error=退回预留,V1 骨架策略,
 //! Owner 知会项)。时钟经 [`Clock`] 注入,测试用假时钟,零真实 sleep。
 //!
-//! # 并发约束(Owner 裁定 2026-10-10)
-//! 本调度器按**单线程编排消费者**设计:同 Node 的 acquire/settle/persist 交错
-//! 调用可产生丢失更新(快照-写库非原子)。WP06 引入并发接线前,须先将
-//! [`BudgetScheduler::persist`] 改为持 state 锁贯穿写库。
+//! # 并发约束(Owner 裁定 2026-10-10,M1-WP06-T01 落地)
+//! 本调度器按**单线程编排消费者**设计;WP06 并发接线前置项已落地:
+//! [`BudgetScheduler`] 的状态快照与落库现持 state 锁贯穿同一临界区
+//! ([`Self::acquire`]/[`Self::backoff`]/[`Self::settle`] 直接在持锁段调
+//! `persist_locked`),并发调用不再产生丢失更新(回归单测
+//! `concurrent_acquire_persists_without_lost_updates`)。锁序恒 state→conn,零反向。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -336,8 +339,9 @@ impl BudgetScheduler {
         let backoff_active = now < entry.backoff_until_ms;
         if !backoff_active && entry.used + cost <= p.requests_per_window {
             entry.used += cost;
+            // 持锁贯穿写库(Owner 裁定 2026-10-10):快照与落库同一临界区,并发零丢失。
+            self.persist_locked(node, &state)?;
             drop(state);
-            self.persist(node)?;
             return Ok(Decision::Allow);
         }
         let wait_until_ms = window_end.max(entry.backoff_until_ms);
@@ -345,8 +349,8 @@ impl BudgetScheduler {
         Ok(Decision::Throttled { wait_until_ms })
     }
 
-    /// 429/503 反馈退避(卡内 ②):终点单调延长 = max(旧终点, now+基数),写穿
-    /// 持久化;重复反馈(连续限流)持续后移。**仅对有 profile 的 Node 生效**
+    /// 429/503 反馈退避(卡内 ②):终点单调延长 = max(旧终点, now+基数),持锁
+    /// 贯穿写穿持久化;重复反馈(连续限流)持续后移。**仅对有 profile 的 Node 生效**
     /// (Owner 裁定 2026-10-10:无 profile Node 空操作,429/503 照常上浮)。
     pub fn backoff(&self, node: &str) -> Result<(), PartisyError> {
         if !self.profiles.profiles.contains_key(node) {
@@ -354,12 +358,11 @@ impl BudgetScheduler {
         }
         let now = self.clock.now_millis()?;
         let until = now.saturating_add(self.profiles.backoff.as_millis() as u64);
-        {
-            let mut state = self.lock_state()?;
-            let entry = state.entry(node.to_owned()).or_default();
-            entry.backoff_until_ms = entry.backoff_until_ms.max(until);
-        }
-        self.persist(node)
+        let mut state = self.lock_state()?;
+        let entry = state.entry(node.to_owned()).or_default();
+        entry.backoff_until_ms = entry.backoff_until_ms.max(until);
+        // 持锁贯穿写库(同 acquire)。
+        self.persist_locked(node, &state)
     }
 
     /// job 终态回填计量(卡内 ⑤):见 [`Metering`];无 profile 未计量,空操作。
@@ -370,18 +373,18 @@ impl BudgetScheduler {
         if !self.profiles.profiles.contains_key(node) {
             return Ok(());
         }
-        {
-            let mut state = self.lock_state()?;
-            if let Some(entry) = state.get_mut(node) {
-                entry.used = entry.used.saturating_sub(cost);
-            }
+        let mut state = self.lock_state()?;
+        if let Some(entry) = state.get_mut(node) {
+            entry.used = entry.used.saturating_sub(cost);
         }
-        self.persist(node)
+        // 持锁贯穿写库(同 acquire);未计量 Node 的行缺失在此被拦(零静默)。
+        self.persist_locked(node, &state)
     }
 
     /// 与 JobManager 接缝(卡内 ⑤):submit 前置 acquire——Allow 即扣减并提交引擎
-    /// (submit 随后失败 = 预算已耗,保守方向不放大配额);Throttled 不落行由调用方
-    /// 择时重试;Exhausted 经 `register_queued` 留 queued 零引擎触达(复活属 WP06)。
+    /// (submit 随后失败 = 预算已耗+残留 queued 无锚行,保守方向不放大配额,恢复
+    /// 经 `JobManager::revive_parked` WP06-T01);Throttled 不落行由调用方择时重试;
+    /// Exhausted 经 `register_queued` 留 queued 零引擎触达(复活走 revive_parked)。
     pub fn gated_submit(
         &self,
         manager: &JobManager,
@@ -425,20 +428,22 @@ impl BudgetScheduler {
         })
     }
 
-    /// 写穿:快照内存态 → budget_state upsert(行先于写消失 = 编程错误,Fatal)。
-    /// 单线程约束见模块注释(快照-写库非原子,并发交错可丢失更新;WP06 前改持锁贯穿)。
-    fn persist(&self, node: &str) -> Result<(), PartisyError> {
-        let (used, window, backoff) = {
-            let state = self.lock_state()?;
-            let entry = state.get(node).ok_or_else(|| {
-                JobErrorKind::Invalid(format!("budget state vanished for `{node}`")).fatal()
-            })?;
-            (
-                entry.used as i64,
-                entry.window_start_ms as i64,
-                entry.backoff_until_ms as i64,
-            )
-        };
+    /// 持锁贯穿写穿(Owner 裁定 2026-10-10 并发前置):调用方须已持 state 锁,
+    /// 快照读取与 budget_state upsert 同一临界区,并发交错零丢失更新;行先于写
+    /// 消失 = 编程错误,Fatal。锁序恒 state→conn(全模块唯一持双锁路径)。
+    fn persist_locked(
+        &self,
+        node: &str,
+        state: &BTreeMap<String, NodeState>,
+    ) -> Result<(), PartisyError> {
+        let entry = state.get(node).ok_or_else(|| {
+            JobErrorKind::Invalid(format!("budget state vanished for `{node}`")).fatal()
+        })?;
+        let (used, window, backoff) = (
+            entry.used as i64,
+            entry.window_start_ms as i64,
+            entry.backoff_until_ms as i64,
+        );
         self.lock()?
             .execute(
                 "INSERT INTO budget_state (node, used, window_start_ms, backoff_until_ms)
@@ -798,5 +803,62 @@ mod tests {
         let err = bwlimit(&broken, Some("1Mi")).expect_err("missing bps");
         assert_eq!(err.severity, crate::error::Severity::Fatal);
         assert!(matches!(kind_of(&err), Some(JobErrorKind::Invalid(_))));
+    }
+
+    /// 并发档(大桶不触发限流;fixture 数值非 provider 事实)。
+    const CONCURRENT_PROFILES: &str = r#"{"version":1,"profiles":{"testprov":{"requests_per_window":100000,"window_secs":1000,"source":"test fixture"}},"bwlimit":{"rate":"off"},"backoff_secs":60}"#;
+
+    #[test]
+    fn concurrent_acquire_persists_without_lost_updates() {
+        // 卡内 ⑦(Owner 裁定 2026-10-10 并发前置):persist 持锁贯穿——8 线程×250
+        // 次 acquire 后,库内 used 必须恰等于 Allow 总数;快照与落库分离的旧实现
+        // 在交错下会丢失更新(used < 实际 Allow 数),本测试为其回归闸。
+        let path = temp_db("concurrent");
+        let (clock, _handle) = FakeClock::at(T0);
+        let scheduler = std::sync::Arc::new(
+            BudgetScheduler::open_at(
+                &path,
+                QuotaProfiles::parse(CONCURRENT_PROFILES).expect("fixture parses"),
+            )
+            .expect("open scheduler")
+            .with_clock(Box::new(clock)),
+        );
+        const THREADS: u64 = 8;
+        const PER_THREAD: u64 = 250;
+        let total: u64 = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut allowed = 0u64;
+                        for _ in 0..PER_THREAD {
+                            // PartisyError 无 PartialEq,逐分支比对(错误即 panic 上浮)。
+                            match scheduler.acquire("testprov", 1) {
+                                Ok(Decision::Allow) => allowed += 1,
+                                Ok(other) => panic!("大桶不应限流: {other:?}"),
+                                Err(err) => panic!("acquire 失败: {err}"),
+                            }
+                        }
+                        allowed
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("thread joins"))
+                .sum()
+        });
+        assert_eq!(total, THREADS * PER_THREAD, "大桶不触发限流,全数放行");
+        let conn = Connection::open(&path).expect("reopen db");
+        let used: i64 = conn
+            .query_row(
+                "SELECT used FROM budget_state WHERE node = 'testprov'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("used row");
+        assert_eq!(
+            used as u64, total,
+            "库内 used 必须等于实际 Allow 总数(丢失更新回归)"
+        );
     }
 }
