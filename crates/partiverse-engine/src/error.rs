@@ -39,11 +39,14 @@ pub enum EngineErrorKind {
     RcdNotReady(String),
     /// rcd 上报版本与 manifest 锁定版本不符(装错引擎,重装才有意义,Fatal)。
     RcdVersionMismatch {
-        /// manifest 锚定期望版本(如 "v1.75.1")。
+        /// manifest 锁定期望版本(如 "v1.75.1")。
         expected: String,
         /// rcd 实际上报版本。
         actual: String,
     },
+    /// 加密 config 无法以注入密钥解密/校验异常(凭据失效或装错密钥,重试
+    /// 无意义,Fatal);载荷=诊断文本(零密钥)。(M1-WP04-T01 接缝新增)
+    RcdConfigDecryptFailed(String),
     /// 优雅退出未完成(SIGTERM 投递异常/收尾清理失败,Fatal);载荷=失败点描述。
     RcdShutdownFailed(String),
     /// 崩溃重启耗尽指数退避(≤5 次)进入 Failed 终态(Fatal)。
@@ -214,6 +217,9 @@ impl fmt::Display for EngineErrorKind {
                     f,
                     "rcd version mismatch: expected {expected}, actual {actual}"
                 )
+            }
+            EngineErrorKind::RcdConfigDecryptFailed(detail) => {
+                write!(f, "rcd config decrypt failed: {detail}")
             }
             EngineErrorKind::RcdShutdownFailed(detail) => {
                 write!(f, "rcd shutdown failed: {detail}")

@@ -27,6 +27,25 @@ use crate::manifest::EngineManifest;
 const AUTH_USER_ENV: &str = "RCLONE_RC_USER";
 /// rclone 1.75.1 官方 env 映射之二:`--rc-pass` → `RCLONE_RC_PASS`(同上核实)。
 const AUTH_PASS_ENV: &str = "RCLONE_RC_PASS";
+/// rclone 1.75.1 官方 env 映射之三:`--config` → `RCLONE_CONFIG`(M1-WP04-T01
+/// 实机核实:注入后 rclone DEBUG 日志明示「Setting --config ... from
+/// environment variable RCLONE_CONFIG」)。
+const CONFIG_ENV: &str = "RCLONE_CONFIG";
+/// rclone 1.75.1 官方 env 映射之四:`--password-command` →
+/// `RCLONE_PASSWORD_COMMAND`(M1-WP04-T01 实机核实:注入后加密 config 解密
+/// 生效)。值 = 平台取密脚本/命令,从 OS keychain 输出主密钥,内容零密钥。
+const PASSWORD_COMMAND_ENV: &str = "RCLONE_PASSWORD_COMMAND";
+
+/// 加密 config 注入要素(M1-WP04-T01 接缝):rcd 以加密 config + 取密命令
+/// 启动。契约:`password_command` 为取密命令(生产=config/ 平台脚本,内容
+/// 从 keychain 取主密钥),**禁止内嵌密钥本体**(密钥零 argv/零落盘/零日志)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigInjection {
+    /// 加密 config 文件路径(→ `RCLONE_CONFIG`)。
+    pub config_path: PathBuf,
+    /// 取密命令(→ `RCLONE_PASSWORD_COMMAND`,rclone 经其输出取得 config 密码)。
+    pub password_command: String,
+}
 
 /// 就绪探活总窗口(本机实测 rclone 冷启动 <1s;CI 留足余量)。
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -191,6 +210,9 @@ pub struct RcdSupervisor {
     expected_version: String,
     /// 槽位 cache-dir(T03:崩溃重启按同一路径重注入 `--cache-dir`,Q5)。
     cache_dir: PathBuf,
+    /// 加密 config 注入要素(M1-WP04-T01;None=未启用 config 加密,重启按
+    /// 同一要素重注入)。
+    injection: Option<ConfigInjection>,
     /// 本次实例的 unix socket 路径(临时目录下随机名;重启即换新名)。
     socket_path: PathBuf,
     /// 随机认证用户(CSPRNG hex;Debug 脱敏)。
@@ -223,24 +245,91 @@ impl RcdSupervisor {
     /// 与随机凭据(env 传递)、最小参数集;`cache_dir` 注入 `--cache-dir`
     /// (T03 槽位参数化,rclone 1.75.1 全局 flag,`help flags`+rcd 烟测实测);
     /// 就绪窗口超时或版本断言失败 → 收尾(杀进程+清 socket)后错误上浮,不留
-    /// 孤儿进程。
+    /// 孤儿进程。等价 [`Self::spawn_with_config`] 传 `None`。
+    ///
+    /// # Errors
+    /// spawn/探活失败按既有错误体系上浮(零静默)。
     pub fn spawn(binary: &Path, cache_dir: &Path) -> Result<Self, EngineError> {
+        Self::spawn_with_config(binary, cache_dir, None)
+    }
+
+    /// 拉起 rcd 并注入加密 config 要素(M1-WP04-T01 接缝):除 [`Self::spawn`]
+    /// 全部行为外,把 `injection` 以 `RCLONE_CONFIG`/`RCLONE_PASSWORD_COMMAND`
+    /// env 交给 rcd(1.75.1 官方映射,实机核实)并在崩溃重启时按同一要素重
+    /// 注入。注意:rclone 1.75.1 的 config 加载为惰性(rcd 无密钥也能就绪,
+    /// 实机核实),config 触达的失败由 [`Self::verify_config_decryptable`]
+    /// 以 Fatal 显式上浮,本方法探活不虚报成功语义之外的可用性。
+    ///
+    /// # Errors
+    /// spawn/探活失败按既有错误体系上浮(零静默)。
+    pub fn spawn_with_config(
+        binary: &Path,
+        cache_dir: &Path,
+        injection: Option<&ConfigInjection>,
+    ) -> Result<Self, EngineError> {
         // 版本断言基准 = 随仓 manifest 锁定版本(rclone 上报形态带 "v" 前缀,
         // 本机 core/version 实测核实)。manifest 非法 → Fatal 原样上浮。
         let expected_version = format!("v{}", EngineManifest::embedded()?.version);
-        let mut launched = launch_and_probe(binary, cache_dir, &expected_version)?;
+        let mut launched = launch_and_probe(binary, cache_dir, &expected_version, injection)?;
         // RcdLaunch 实现 Drop(泄漏保险),不可整体搬移:mem::take 逐字段提取,
         // 提取后的空壳 Drop 无害(child=None → 跳过收尸;空路径 → NotFound 忽略)。
         Ok(Self {
             binary: binary.to_path_buf(),
             expected_version,
             cache_dir: cache_dir.to_path_buf(),
+            injection: injection.cloned(),
             socket_path: std::mem::take(&mut launched.socket_path),
             user: std::mem::take(&mut launched.user),
             pass: std::mem::take(&mut launched.pass),
             child: std::mem::take(&mut launched.child),
             state: RcdState::Ready,
         })
+    }
+
+    /// 校验注入的加密 config 可解密(M1-WP04-T01):以同一二进制跑
+    /// `rclone config encryption check`(`RCLONE_CONFIG`+`RCLONE_PASSWORD_COMMAND`
+    /// env 注入,stdin 置空),退出码 0=可解密 / 1=解密失败(含轮换后旧 config
+    /// 失效)/ 2=未加密;非零均 Fatal `RcdConfigDecryptFailed` 显式上浮,零静默
+    /// (rclone 1.75.1 退出码语义实机核实,见 crates/partiverse-core credential_store
+    /// 模块头注)。未注入 config → 结构化 Fatal(调用方编程错误)。
+    ///
+    /// # Errors
+    /// 解密失败/未加密/进程异常 → `RcdConfigDecryptFailed`(Fatal)。
+    pub fn verify_config_decryptable(&self) -> Result<(), EngineError> {
+        let injection = self.injection.as_ref().ok_or_else(|| {
+            EngineError::new(
+                EngineErrorKind::RcdConfigDecryptFailed(
+                    "no config injection configured for this supervisor".into(),
+                ),
+                Severity::Fatal,
+            )
+        })?;
+        let output = Command::new(&self.binary)
+            .arg("config")
+            .arg("encryption")
+            .arg("check")
+            .env(CONFIG_ENV, &injection.config_path)
+            .env(PASSWORD_COMMAND_ENV, &injection.password_command)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(EngineError::from_io)?;
+        if output.status.success() {
+            return Ok(());
+        }
+        // rclone 错误文本零密钥(密码不回显),首行截断防刷屏。
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = stderr
+            .lines()
+            .chain(stdout.lines())
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| line.chars().take(200).collect::<String>())
+            .unwrap_or_else(|| format!("exit status {}", output.status));
+        Err(EngineError::new(
+            EngineErrorKind::RcdConfigDecryptFailed(detail),
+            Severity::Fatal,
+        ))
     }
 
     /// 就绪后按需探活:执行一次 `core/version` 并返回上报版本串(如 "v1.75.1");
@@ -322,8 +411,14 @@ impl RcdSupervisor {
         self.state = RcdState::Starting;
         for delay in RESTART_DELAYS {
             thread::sleep(delay);
-            // 重启按同槽位 cache_dir 重注入(槽位参数随监督器存活周期保持)。
-            match launch_and_probe(&self.binary, &self.cache_dir, &self.expected_version) {
+            // 重启按同槽位 cache_dir 与同一 config 注入要素重注入(参数随监督器
+            // 存活周期保持,M1-WP04-T01)。
+            match launch_and_probe(
+                &self.binary,
+                &self.cache_dir,
+                &self.expected_version,
+                self.injection.as_ref(),
+            ) {
                 Ok(mut launched) => {
                     // mem::take 逐字段提取(RcdLaunch 有 Drop 不可搬移,见 spawn 注)。
                     self.socket_path = std::mem::take(&mut launched.socket_path);
@@ -470,8 +565,9 @@ fn launch_and_probe(
     binary: &Path,
     cache_dir: &Path,
     expected_version: &str,
+    injection: Option<&ConfigInjection>,
 ) -> Result<RcdLaunch, EngineError> {
-    let mut launched = launch(binary, cache_dir)?;
+    let mut launched = launch(binary, cache_dir, injection)?;
     match launched.wait_until_ready(expected_version) {
         Ok(()) => Ok(launched),
         Err(err) => {
@@ -487,7 +583,11 @@ fn launch_and_probe(
 
 /// 生成连接要素并 spawn rcd(卡内 ①:unix socket 随机名 + 随机凭据 + 最小参数集)。
 #[cfg(not(unix))]
-fn launch(_binary: &Path, _cache_dir: &Path) -> Result<RcdLaunch, EngineError> {
+fn launch(
+    _binary: &Path,
+    _cache_dir: &Path,
+    _injection: Option<&ConfigInjection>,
+) -> Result<RcdLaunch, EngineError> {
     // 卡内安全模式=unix socket,无 TCP 回退(禁止行为清单):非 unix 平台
     // 显式 Fatal 上浮,不静默降级。
     Err(EngineError::new(
@@ -500,29 +600,39 @@ fn launch(_binary: &Path, _cache_dir: &Path) -> Result<RcdLaunch, EngineError> {
 }
 
 /// unix 实现:spawn rcd 进程(最小参数集,认证走 env,argv 零明文 pass;
-/// `--cache-dir` 注入槽位缓存路径,T03 槽位参数化)。
+/// `--cache-dir` 注入槽位缓存路径,T03 槽位参数化;M1-WP04-T01 加密 config
+/// 注入走 `RCLONE_CONFIG`/`RCLONE_PASSWORD_COMMAND` env,argv 零密钥)。
 #[cfg(unix)]
-fn launch(binary: &Path, cache_dir: &Path) -> Result<RcdLaunch, EngineError> {
+fn launch(
+    binary: &Path,
+    cache_dir: &Path,
+    injection: Option<&ConfigInjection>,
+) -> Result<RcdLaunch, EngineError> {
     let socket_path = random_socket_path()?;
     let (user, pass) = generate_credentials()?;
     // 最小参数集:rcd 默认仅开 rc 服务;`--rc-addr unix://…` 强制 unix socket
     // (1.75.1 实测核实,零 TCP/默认端口);`--cache-dir` 为 1.75.1 全局 flag
     // (`rclone help flags` + rcd 组合烟测实测)。
-    let child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .arg("rcd")
         .arg("--rc-addr")
         .arg(format!("unix://{}", socket_path.display()))
         .arg("--cache-dir")
         .arg(cache_dir)
         .env(AUTH_USER_ENV, &user)
-        .env(AUTH_PASS_ENV, &pass)
-        .spawn()
-        .map_err(|err| {
-            EngineError::new(
-                EngineErrorKind::RcdStartFailed(format!("spawn {}: {err}", binary.display())),
-                Severity::Fatal,
-            )
-        })?;
+        .env(AUTH_PASS_ENV, &pass);
+    if let Some(injection) = injection {
+        command
+            .env(CONFIG_ENV, &injection.config_path)
+            .env(PASSWORD_COMMAND_ENV, &injection.password_command);
+    }
+    let child = command.spawn().map_err(|err| {
+        EngineError::new(
+            EngineErrorKind::RcdStartFailed(format!("spawn {}: {err}", binary.display())),
+            Severity::Fatal,
+        )
+    })?;
     Ok(RcdLaunch {
         binary: binary.to_path_buf(),
         socket_path,

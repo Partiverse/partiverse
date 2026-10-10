@@ -8,8 +8,14 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod budget;
 pub mod caps;
+// 模块名 credential_store(而非 credentials):仓库 .gitignore 既有 `credentials*`
+// 反密钥入库模式会吞掉 credentials.rs 致其永远无法提交,改名绕开(M1-WP04-T01)。
+pub mod credential_store;
 pub mod error;
 pub mod jobs;
+// OAuth 本地回调与百度 oob 式本地换码(M1-WP04-T02):回调服务器/oob 回填
+// 换码/token 下沉接缝,核心零 token 持久化。
+pub mod oauth;
 
 /// 数据模型空壳:由 WP08(索引与搜索)的数据模型落地,当前刻意留空。
 pub mod types;
