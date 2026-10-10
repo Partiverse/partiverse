@@ -26,7 +26,7 @@ function SceneEntry({ label }: { label: string }) {
   );
 }
 
-export function Sidebar({ onOpenDiagnostics }: { onOpenDiagnostics: () => void }) {
+export function Sidebar({ onOpenDiagnostics, onAddNode }: { onOpenDiagnostics: () => void; onAddNode: () => void }) {
   return (
     <aside className="flex w-60 shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
       <div className="flex items-center gap-2 px-4 py-3">
@@ -61,7 +61,8 @@ export function Sidebar({ onOpenDiagnostics }: { onOpenDiagnostics: () => void }
         <EngineHealthBadge onOpen={onOpenDiagnostics} />
       </div>
       <div className="border-t border-sidebar-border p-3">
-        <Button variant="outline" size="sm" className="w-full" disabled>
+        {/* T03:添加 Node 向导入口(DoD①)——点击开向导对话框。 */}
+        <Button variant="outline" size="sm" className="w-full" onClick={onAddNode}>
           {t("sidebar.addNode")}
         </Button>
       </div>
