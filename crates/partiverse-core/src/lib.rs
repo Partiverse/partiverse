@@ -14,6 +14,9 @@ pub mod checksum;
 // 模块名 credential_store(而非 credentials):仓库 .gitignore 既有 `credentials*`
 // 反密钥入库模式会吞掉 credentials.rs 致其永远无法提交,改名绕开(M1-WP04-T01)。
 pub mod credential_store;
+// dlink 失效重取编排骨架(M1-WP06-T04):错误分类(31360/31326,表驱动)+
+// filemetas 重取接口抽象 + 编排(真机验证挂 WP11,官方 rclone 无 baidu 后端)。
+pub mod dlink;
 pub mod error;
 // 文件操作编排(M1-WP06-T02):同步 mkdir/delete(预算 acquire 前置)+ 单文件/
 // 跨 Node 传输编排(gated_submit 全链)+ 进度聚合(core/stats 组采样→progress 列)。

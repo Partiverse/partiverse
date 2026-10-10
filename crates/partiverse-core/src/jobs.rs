@@ -842,6 +842,48 @@ impl JobManager {
         self.get(id)
     }
 
+    /// 编排器配置的自动重试策略只读视图(crate 内接缝,M1-WP06-T04):dlink 重取
+    /// 编排的余量裁决与 [`JobManager::poll`] 自动重试用同一策略(单一事实源,防
+    /// 调用方旁置第二套上限);公开只读面按需另开任务。
+    pub(crate) fn retry_policy(&self) -> RetryPolicy {
+        self.retry
+    }
+
+    /// dlink 重取回队(crate 内专设守卫通道,M1-WP06-T04;先例 = T03
+    /// `mark_verify_failed` 校验通道:WP03 冻结 [`JobStatus::can_transition`] 表
+    /// 不变,终态出边以窄守卫单源 API 收口)。语义:error 终态 → queued 停放——
+    /// 清锚、`retries+1`(重取余量裁决在 `dlink::dlink_refetch_retry` 对照
+    /// [`RetryPolicy::max_retries`],本通道只执行计数)、severity 改标 retryable
+    /// (dlink 分类裁定的失败性质覆盖通用分类的保守 fatal;错误文本保留供观测,
+    /// 与 T01 Retryable 回队同口径)。守卫 `WHERE status='error'`;0 行 = 并发竞速
+    /// 重读消歧:已被他方回队(queued 无锚)幂等让位(复活窗口由
+    /// [`JobManager::revive_parked`] 守卫仲裁),其余 = 非法迁移 Fatal(零覆盖)。
+    pub(crate) fn requeue_for_dlink_refetch(&self, id: &str) -> Result<JobRecord, PartisyError> {
+        let now = now_parts()?.0;
+        let changed = self
+            .lock()?
+            .execute(
+                "UPDATE jobs SET status = 'queued', engine_job_id = NULL,
+                 retries = retries + 1, severity = 'retryable', updated_at = ?1
+                 WHERE id = ?2 AND status = 'error'",
+                rusqlite::params![now, id],
+            )
+            .map_err(|err| db_err("requeue for dlink refetch", err))?;
+        if changed == 0 {
+            let actual = self.get(id)?;
+            if matches!(actual.status, JobStatus::Queued) && actual.engine_job_id.is_none() {
+                return Ok(actual);
+            }
+            return Err(JobErrorKind::IllegalTransition {
+                id: id.to_owned(),
+                from: actual.status,
+                to: JobStatus::Queued,
+            }
+            .fatal());
+        }
+        self.get(id)
+    }
+
     /// 状态推进单入口:同态幂等;合法迁移直写;queued→终态走合法链两步;非法
     /// 拒绝并上浮。`failure` 仅 error 终态携带(一次落库)。
     fn advance(
