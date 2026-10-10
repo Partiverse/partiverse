@@ -12,6 +12,9 @@ pub mod caps;
 // 反密钥入库模式会吞掉 credentials.rs 致其永远无法提交,改名绕开(M1-WP04-T01)。
 pub mod credential_store;
 pub mod error;
+// 文件操作编排(M1-WP06-T02):同步 mkdir/delete(预算 acquire 前置)+ 单文件/
+// 跨 Node 传输编排(gated_submit 全链)+ 进度聚合(core/stats 组采样→progress 列)。
+pub mod fsops;
 pub mod jobs;
 // OAuth 本地回调与百度 oob 式本地换码(M1-WP04-T02):回调服务器/oob 回填
 // 换码/token 下沉接缝,核心零 token 持久化。
