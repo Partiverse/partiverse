@@ -58,10 +58,45 @@ export const commands = {
 	 *  params = JSON 对象文本,壳显式解析,解析失败 Fatal 上浮)。
 	 */
 	jobSubmit: (node: string, method: string, kind: string, src: string, dst: string, params: string, cost: number) => typedError<GatedSubmitOut, CmdError>(__TAURI_INVOKE("job_submit", { node, method, kind, src, dst, params, cost })),
-	/**  轮询单个 job(job/status 观测推进状态机;终态幂等不再触引擎)。 */
+	/**
+	 *  轮询单个 job(M1-WP06-T02 升级:core `poll_with_progress`——job/status 推进
+	 *  状态机 + running 带锚行顺带 core/stats 组采样落进度列;终态/停放行零引擎
+	 *  触达,采样缺失不落列,采样失败结构化上浮)。
+	 */
 	jobPoll: (id: string) => typedError<JobPollOut, CmdError>(__TAURI_INVOKE("job_poll", { id })),
 	/**  启动对账(running 且引擎侧无锚 → error 终态;返回本次对账改判清单)。 */
 	jobsReconcile: () => typedError<JobRecordOut[], CmdError>(__TAURI_INVOKE("jobs_reconcile")),
+	/**
+	 *  新建目录(M1-WP06-T02 卡内 ③):core `fsops::fs_mkdir`(预算 acquire 前置,
+	 *  rc `operations/mkdir` 双参数实测形状);Throttled/Exhausted 零引擎触达原样
+	 *  上浮,由前端择时重试。
+	 */
+	fsMkdir: (node: string, fs: string, remote: string, cost: number) => typedError<FsOpOutcomeOut, CmdError>(__TAURI_INVOKE("fs_mkdir", { node, fs, remote, cost })),
+	/**
+	 *  删除目录树文件(M1-WP06-T02 卡内 ③):core `fsops::fs_delete`(rc
+	 *  `operations/delete`,实测语义 = 递归删除该目录树下全部文件、保留目录壳;
+	 *  指向文件 = 引擎 500 原样上浮)。前端必须预览-提交(破坏性操作禁直通)。
+	 */
+	fsDelete: (node: string, fs: string, cost: number) => typedError<FsOpOutcomeOut, CmdError>(__TAURI_INVOKE("fs_delete", { node, fs, cost })),
+	/**
+	 *  公开任务清单(M1-WP06-T02 卡内 ③):status 过滤(None = 全量),按
+	 *  created_at, id 稳定序;传输队列面板单源。
+	 */
+	jobList: (status: "queued" | "running" | "done" | "error" | null) => typedError<JobRecordOut[], CmdError>(__TAURI_INVOKE("job_list", { status })),
+	/**
+	 *  取消 job(core `job_cancel`:带锚行 job/stop + 终态裁决 error/user_canceled/
+	 *  Interrupted;终态行取消 = 非法迁移 Fatal)。
+	 */
+	jobCancel: (id: string) => typedError<JobRecordOut, CmdError>(__TAURI_INVOKE("job_cancel", { id })),
+	/**
+	 *  重试 job(M1-WP06-T02 卡内 ③;编排层重试退避/re-acquire 执行点):
+	 *  停放行(queued 无锚,预算 Exhausted/自动回队/提交窗残留)→ 预算 re-acquire
+	 *  前置,Allow 即 `revive_parked` 原地复活(同 id,清上次失败标注);error 终态
+	 *  行(重试超限/Fatal/用户取消,终态零出边)→ 预算门提交**新** job(元数据由
+	 *  调用方照首次提交原样供给,行内不落 params,红线 3;旧行留痕);其余状态
+	 *  (running/done/带锚 queued)拒绝 Fatal,零出边。
+	 */
+	jobRetry: (id: string, node: string, method: string, kind: string, src: string, dst: string, params: string, cost: number) => typedError<JobRetryOut, CmdError>(__TAURI_INVOKE("job_retry", { id, node, method, kind, src, dst, params, cost })),
 };
 
 /* Types */
@@ -129,6 +164,16 @@ export type FieldDesc = {
 	default: string | null,
 };
 
+/**  同步文件操作结果(core `fsops::FsOpOutcome` 线格式镜像;M1-WP06-T02)。 */
+export type FsOpOutcomeOut = "applied" | 
+/**  预算限流零引擎触达,可等待重试。 */
+{ throttled: {
+	/**  可重试时刻(epoch 毫秒)。 */
+	wait_until_ms: number,
+} } | 
+/**  预算结构性拒绝(cost 超桶容)。 */
+"exhausted";
+
 /**  预算门提交结果(core `GatedSubmit`;Exhausted=job 留 queued 零引擎触达)。 */
 export type GatedSubmitOut = ({ submitted: JobRecordOut }) & { exhausted?: never; throttled?: never } | ({ throttled: {
 	/**  可重试时刻(epoch 毫秒)。 */
@@ -141,7 +186,11 @@ export type JobPollOut = {
 	output: string | null,
 };
 
-/**  jobs 表行(core `JobRecord` 直映;零文件内容,红线 3)。 */
+/**
+ *  jobs 表行(core `JobRecord` 直映;零文件内容,红线 3)。
+ *  M1-WP06-T02 增补传输面四列:进度(采样来源 core/stats 组)/校验和(待
+ *  哈希管线,白名单无哈希查询命令,登记非静默)/自动重试累计。
+ */
 export type JobRecordOut = {
 	id: string,
 	kind: string,
@@ -149,17 +198,35 @@ export type JobRecordOut = {
 	dst: string,
 	status: JobStatusOut,
 	/**
-	 *  rc jobid:specta-typescript 禁导 i64,经官方 `Number` 标注
-	 *  (jobid 远小于 2^53,精度损失不可达)。
+	 *  rc jobid:specta-typescript 禁导 i64,经官方 `Option<Number>` 标注
+	 *  (jobid 远小于 2^53,精度损失不可达;可空语义保留——停放行 None)。
 	 */
-	engine_job_id: number,
+	engine_job_id: number | null,
 	error: string | null,
 	severity: Severity | null,
 	created_at: string,
 	updated_at: string,
+	/**  已传字节(core/stats 组采样;None = 未采样)。 */
+	progress_bytes: number | null,
+	/**  预估总字节(None = 不可比)。 */
+	progress_total: number | null,
+	/**  校验和标注(None = 未计算;哈希管线另卡)。 */
+	checksum: string | null,
+	/**  Retryable 自动回队累计。 */
+	retries: number,
 };
 
-/**  job 状态(core `JobStatus` 线格式镜像)。 */
+/**
+ *  job 重试结果(M1-WP06-T02):Revived=停放行原地复活(同 id);Submitted=
+ *  error 终态行按预算门提交**新** job(终态零出边,旧行留痕);Throttled/
+ *  Exhausted = 预算门未放行(行面不变)。
+ */
+export type JobRetryOut = ({ revived: JobRecordOut }) & { exhausted?: never; submitted?: never; throttled?: never } | ({ submitted: JobRecordOut }) & { exhausted?: never; revived?: never; throttled?: never } | ({ throttled: {
+	/**  可重试时刻(epoch 毫秒)。 */
+	wait_until_ms: number,
+} }) & { exhausted?: never; revived?: never; submitted?: never } | ({ exhausted: JobRecordOut }) & { revived?: never; submitted?: never; throttled?: never };
+
+/**  job 状态(core `JobStatus` 线格式镜像;Deserialize 供命令参数面反序列化)。 */
 export type JobStatusOut = "queued" | "running" | "done" | "error";
 
 /**  单个 provider 的连接表单 schema(core `ProviderForm` 线格式)。 */

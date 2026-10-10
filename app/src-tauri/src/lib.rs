@@ -28,6 +28,11 @@ fn ipc_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::job_submit,
         commands::job_poll,
         commands::jobs_reconcile,
+        commands::fs_mkdir,
+        commands::fs_delete,
+        commands::job_list,
+        commands::job_cancel,
+        commands::job_retry,
     ])
 }
 
