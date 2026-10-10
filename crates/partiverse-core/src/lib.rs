@@ -8,6 +8,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod budget;
 pub mod caps;
+// 传输校验(M1-WP06-T03):哈希比对降级链(共同哈希→size→两段采样)+ 校验和
+// 落库 + 校验失败→job error(Severity 按差异性质)。远端采样通道挂 WP07。
+pub mod checksum;
 // 模块名 credential_store(而非 credentials):仓库 .gitignore 既有 `credentials*`
 // 反密钥入库模式会吞掉 credentials.rs 致其永远无法提交,改名绕开(M1-WP04-T01)。
 pub mod credential_store;

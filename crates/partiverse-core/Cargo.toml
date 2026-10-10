@@ -31,6 +31,12 @@ keyring = { version = "2.3.3", default-features = false, features = [
     "linux-default-keyutils",
 ] }
 
+# 传输校验采样指纹原语(M1-WP06-T03,ADR-0009):sha2 0.11 = 锁树既有版本
+# (ADR-0004 已裁定该选型;engine 同版 dev-dep 在树,零新增包/零新增版本)。
+# 采样方案「头N+尾N+size」自写(复用评估 §2 过渡件,V2 交 partisync cas);
+# blake3 候选被否(新增顶层依赖 + C/asm 构建面,过渡件零增益),证据见 ADR-0009。
+sha2 = "0.11"
+
 # token 端点 HTTP 客户端(M1-WP04-T02,树内既有依赖单源,ADR-0004):与
 # partiverse-engine 同版 3.4.2(union 零新增版本),默认 rustls+ring;本 crate
 # 代码路径不触及 TLS 配置,证书校验恒开(ureq 3.4.2 提供 disable_verification
@@ -52,3 +58,7 @@ getrandom = "0.2.17"
 # 显式 version 避免 deny wildcards=deny 误伤(ADR-0004 同款)。
 partiverse-engine = { path = "../partiverse-engine", version = "0.1.0" }
 # 零依赖基线(M1);新依赖需 ADR(AGENTS.md 铁律 8)。
+# 性质测试框架(M1-WP06-T03,ADR-0009,仅 dev):采样哈希性质(确定性/窗口内
+# 敏感性/size 参与混淆)。选 proptest 因卡内 ⑤ 点名;MIT/Apache-2.0 双授权,
+# 无商业授权条款;新增锁树面已在 ADR-0009 逐项披露。
+proptest = "1.4"

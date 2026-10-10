@@ -805,6 +805,43 @@ impl JobManager {
         Ok(())
     }
 
+    /// 校验失败终态(T03 DoD④:校验失败→job error,Severity 按差异性质——
+    /// 内容差异/缺条目 = Fatal,尺寸差异 = Retryable,由 checksum::verify_job
+    /// 裁定后传入)。校验发生于 job 完成后,差异是事后才能观测的失败,故本 API
+    /// 是**校验通道显式的 done→error 单源**:`can_transition` 冻结表(WP03 形状,
+    /// 终态零出边)不变,守卫 `WHERE status='done'` 收口;0 行 = 重读消歧——
+    /// 已 error(重复校验失败)幂等返回现行记录(零覆盖),其余状态 = Fatal
+    /// (校验只对 done 行有意义)。`error` 列 = 差异细节文本;`checksum` 列不动
+    /// (失败不留「通过」标注)。
+    pub fn mark_verify_failed(
+        &self,
+        id: &str,
+        error: &str,
+        severity: Severity,
+    ) -> Result<JobRecord, PartisyError> {
+        let now = now_parts()?.0;
+        let changed = self
+            .lock()?
+            .execute(
+                "UPDATE jobs SET status = 'error', error = ?1, severity = ?2, updated_at = ?3
+                 WHERE id = ?4 AND status = 'done'",
+                rusqlite::params![error, severity_raw(severity), now, id],
+            )
+            .map_err(|err| db_err("mark verify failed", err))?;
+        if changed == 0 {
+            let actual = self.get(id)?;
+            if matches!(actual.status, JobStatus::Error) {
+                return Ok(actual);
+            }
+            return Err(JobErrorKind::Invalid(format!(
+                "verification requires a done job: `{id}` is `{}`",
+                actual.status.as_str()
+            ))
+            .fatal());
+        }
+        self.get(id)
+    }
+
     /// 状态推进单入口:同态幂等;合法迁移直写;queued→终态走合法链两步;非法
     /// 拒绝并上浮。`failure` 仅 error 终态携带(一次落库)。
     fn advance(
@@ -1686,5 +1723,56 @@ mod tests {
             .set_checksum("missing-job", "x")
             .expect_err("unknown id");
         assert_eq!(err.severity, Sev::Fatal);
+    }
+
+    #[test]
+    fn mark_verify_failed_lands_done_rows_and_is_idempotent() {
+        // T03 校验通道:done → error(severity 落列保真);非 done = Fatal 零触达;
+        // 重复失败幂等返回首次裁决;checksum 列不动。
+        let mgr = mem_manager();
+        // ① done 行:hash 差异(Fatal)落 error 终态。
+        let job = submit_ok(&mgr, 61);
+        mgr.advance(&job.id, Queued, Running, None)
+            .expect("running");
+        mgr.advance(&job.id, Running, Done, None).expect("done");
+        let landed = mgr
+            .mark_verify_failed(&job.id, "checksum mismatch (sha1): src=a dst=b", Sev::Fatal)
+            .expect("land");
+        assert_eq!(
+            (landed.status, landed.error.as_deref(), landed.severity),
+            (
+                Error,
+                Some("checksum mismatch (sha1): src=a dst=b"),
+                Some(Sev::Fatal)
+            )
+        );
+        // ② 重复校验失败:幂等返回现行记录,首裁不被覆盖。
+        let again = mgr
+            .mark_verify_failed(&job.id, "size mismatch: src=1 dst=2", Sev::Retryable)
+            .expect("idempotent");
+        assert_eq!(
+            (again.status, again.error.as_deref(), again.severity),
+            (
+                Error,
+                Some("checksum mismatch (sha1): src=a dst=b"),
+                Some(Sev::Fatal)
+            )
+        );
+        // ③ queued 行拒绝(Fatal,校验只对 done 行有意义)。
+        let parked = mgr.register_queued("copy", "a:", "b:").expect("parked");
+        let err = mgr
+            .mark_verify_failed(&parked.id, "x", Sev::Retryable)
+            .expect_err("non-done rejected");
+        assert_eq!(err.severity, Sev::Fatal);
+        assert!(matches!(kind_of(&err), Some(Invalid(_))));
+        // ④ 尺寸差异(Retryable)同样落列(Severity 按差异性质)。
+        let job2 = submit_ok(&mgr, 62);
+        mgr.advance(&job2.id, Queued, Running, None)
+            .expect("running");
+        mgr.advance(&job2.id, Running, Done, None).expect("done");
+        let landed = mgr
+            .mark_verify_failed(&job2.id, "size mismatch: src=100 dst=90", Sev::Retryable)
+            .expect("land");
+        assert_eq!(landed.severity, Some(Sev::Retryable));
     }
 }
