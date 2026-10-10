@@ -121,6 +121,34 @@
     --sidebar-ring: oklch(0.556 0 0);
 }
 
+/*
+ * 护眼暖色主题(M1-WP05-T02 DoD⑦):[data-theme="warm"] 语义变量表。
+ * 三套主题挂载机制(applyTheme,src/design/tokens.ts):
+ *   dark  = html.dark(T01 既有表,上方)+ data-theme="dark" 标记(暗默认);
+ *   light = 移除 .dark 后回落 :root 缺省表(无独立块);
+ *   warm  = 本表(暖色低刺激基调)。
+ * 令牌同源纪律:品牌色仍唯一定义于 src/design/tokens.json 启动挂载;
+ * 语义变量表沿用 T01 以来 index.css 单一来源,未引入第三令牌源。
+ */
+[data-theme="warm"] {
+    --background: oklch(0.96 0.024 85); --foreground: oklch(0.31 0.035 60);
+    --card: oklch(0.975 0.018 85); --card-foreground: oklch(0.31 0.035 60);
+    --popover: oklch(0.975 0.018 85); --popover-foreground: oklch(0.31 0.035 60);
+    --primary: oklch(0.44 0.08 60); --primary-foreground: oklch(0.98 0.01 85);
+    --secondary: oklch(0.91 0.03 84); --secondary-foreground: oklch(0.34 0.04 60);
+    --muted: oklch(0.91 0.03 84); --muted-foreground: oklch(0.48 0.04 70);
+    --accent: oklch(0.88 0.045 84); --accent-foreground: oklch(0.34 0.04 60);
+    --destructive: oklch(0.55 0.19 27); --border: oklch(0.84 0.035 80);
+    --input: oklch(0.84 0.035 80); --ring: oklch(0.62 0.06 70);
+    --chart-1: oklch(0.87 0.03 84); --chart-2: oklch(0.556 0 0);
+    --chart-3: oklch(0.439 0 0); --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0); --sidebar: oklch(0.935 0.028 84);
+    --sidebar-foreground: oklch(0.31 0.035 60); --sidebar-primary: oklch(0.44 0.08 60);
+    --sidebar-primary-foreground: oklch(0.98 0.01 85); --sidebar-accent: oklch(0.88 0.045 84);
+    --sidebar-accent-foreground: oklch(0.34 0.04 60); --sidebar-border: oklch(0.84 0.035 80);
+    --sidebar-ring: oklch(0.62 0.06 70);
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

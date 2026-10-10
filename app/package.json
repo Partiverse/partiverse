@@ -31,6 +31,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@tanstack/table-core": "9.2.8",
     "@tauri-apps/cli": "^2",
     "@testing-library/react": "^16.3.3",
     "@types/node": "^26.6.4",
