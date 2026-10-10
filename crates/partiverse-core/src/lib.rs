@@ -13,6 +13,9 @@ pub mod caps;
 pub mod credential_store;
 pub mod error;
 pub mod jobs;
+// OAuth 本地回调与百度 oob 式本地换码(M1-WP04-T02):回调服务器/oob 回填
+// 换码/token 下沉接缝,核心零 token 持久化。
+pub mod oauth;
 
 /// 数据模型空壳:由 WP08(索引与搜索)的数据模型落地,当前刻意留空。
 pub mod types;

@@ -26,6 +26,13 @@ keyring = { version = "2.3.3", default-features = false, features = [
     "linux-default-keyutils",
 ] }
 
+# token 端点 HTTP 客户端(M1-WP04-T02,树内既有依赖单源,ADR-0004):与
+# partiverse-engine 同版 3.4.2(union 零新增版本),默认 rustls+ring;本 crate
+# 代码路径不触及 TLS 配置,证书校验恒开(ureq 3.4.2 提供 disable_verification
+# 开关,本仓零调用,审查实证);生产请求面仅百度 token 端点(https),
+# 本地回环 http 为测试 Fake 注入缝(卡内 ⑥ 禁真实网络)。
+ureq = "3.4.2"
+
 # 主密钥随机源的非 unix 平台分支(M1-WP04-T01,ADR-0007):windows/mac 无
 # /dev/urandom,std 直读不可移植;getrandom 0.2 = 树内既有版本(ring 传递依赖,
 # 零新增版本,deny multiple-versions 保持绿),内部走 BCryptGenRandom/getentropy

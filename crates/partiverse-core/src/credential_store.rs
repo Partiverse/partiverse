@@ -217,8 +217,9 @@ pub fn generate_master_key() -> Result<String, PartisyError> {
     }))
 }
 
-/// 读 32 字节 CSPRNG(平台分支,零手写密码学、零 unsafe)。
-fn random_bytes() -> Result<[u8; 32], PartisyError> {
+/// 读 32 字节 CSPRNG(平台分支,零手写密码学、零 unsafe;crate 内复用面:
+/// oauth::generate_state 与本模块主密钥同源,M1-WP04-T02)。
+pub(crate) fn random_bytes() -> Result<[u8; 32], PartisyError> {
     #[cfg(unix)]
     {
         use std::io::Read;
