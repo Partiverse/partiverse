@@ -13,7 +13,7 @@ use partiverse_core::fsops::{self, FsOpOutcome, SingleFileOutcome, SingleFileSpe
 use partiverse_core::jobs::{JobManager, JobStatus, RcDispatch};
 use serde_json::json;
 
-use crate::browse::split_target;
+use crate::browse::{render_listing, split_target};
 
 /// 结构化 Fatal 构造(connection.rs 同款先例:std io 错误为 source 根因)。
 pub(crate) fn fatal(message: impl Into<String>) -> PartisyError {
@@ -58,10 +58,12 @@ pub fn mkdir(
 }
 
 /// `rm` 预览段:operations/list 列目标(fs+remote 两键齐传,T09 实锚形状)+
-/// 删除语义告知;stdin 确认在 main.rs 收口。
+/// 删除语义告知;stdin 确认在 main.rs 收口。target listing 经 T03 渲染器出
+/// 人类可读表格(与 `ls` 同函数复用,卡内 ②)。
 pub fn rm_preview(dispatch: &impl RcDispatch, target: &str) -> Result<String, PartisyError> {
     let (fs, remote) = split_target(target);
-    let listing = dispatch.call("operations/list", &json!({ "fs": fs, "remote": remote }))?;
+    let reply = dispatch.call("operations/list", &json!({ "fs": fs, "remote": remote }))?;
+    let listing = render_listing(&reply).join("\n");
     Ok(format!(
         "about to delete ALL FILES under `{target}` (engine semantics: files removed, \
          directory shell kept; a file target fails on the engine)\n--- target listing ---\n{listing}"
@@ -201,5 +203,53 @@ fn wait_or_report(
             _ if wait => std::thread::sleep(Duration::from_secs(1)),
             _ => return Ok(lines.join("\n")),
         }
+    }
+}
+
+/// rm 预览渲染复用单测(T03 卡内 ②同函数面;引擎形状由真引擎集成测试锚定)。
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    /// Fake* 测试替身(仅测试命名惯例):固定应答一枚目录+文件 listing。
+    struct FakeListing;
+
+    impl RcDispatch for FakeListing {
+        fn call(&self, method: &str, _params: &Value) -> Result<Value, PartisyError> {
+            assert_eq!(method, "operations/list");
+            Ok(json!({
+                "list": [
+                    { "Name": "sub", "IsDir": true, "Size": 0,
+                      "ModTime": "2026-10-11T09:00:00+08:00" },
+                    { "Name": "a.txt", "IsDir": false, "Size": 2048,
+                      "ModTime": "2026-10-11T09:30:00+08:00" }
+                ]
+            }))
+        }
+    }
+
+    /// rm 预览的 target listing = `ls` 同款表格(非裸 JSON),目录恒前排。
+    #[test]
+    fn rm_preview_renders_target_listing_table() {
+        let out = rm_preview(&FakeListing, "pvlocal:doomed").expect("preview ok");
+        assert!(out.contains("--- target listing ---"), "{out}");
+        assert!(
+            out.lines().any(|line| line.starts_with("NAME")),
+            "表头在列: {out}"
+        );
+        assert!(
+            out.contains("sub") && out.contains("a.txt") && out.contains("2.0 KiB"),
+            "条目行渲染(字节人类可读): {out}"
+        );
+        assert!(
+            out.find("sub").expect("dir row present")
+                < out.find("a.txt").expect("file row present"),
+            "目录恒前排: {out}"
+        );
+        assert!(
+            !out.contains("{\"list\""),
+            "预览 listing 不得为裸 JSON: {out}"
+        );
     }
 }

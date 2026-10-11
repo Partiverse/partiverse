@@ -86,17 +86,22 @@ fn create_local_create_webdav_ls_and_list_readback_on_real_engine() {
     connection::create_webdav(dispatch, &webdav_name, ENDPOINT, "13800000000", APP_PASS)
         .expect("create-webdav ok");
 
-    // ls 全链:operations/list(fs+remote 两键齐传)列沙箱工作区,fixture 命中。
+    // ls 全链:operations/list(fs+remote 两键齐传)列沙箱工作区,T03 渲染面:
+    // 表格输出(表头+条目行,非裸 JSON 起始),fixture 命中。
     let listing = browse::ls(dispatch, &format!("{local_name}:")).expect("ls ok");
-    let reply: serde_json::Value = serde_json::from_str(&listing).expect("ls reply is json");
-    let entries = reply
-        .get("list")
-        .and_then(serde_json::Value::as_array)
-        .expect("ls reply carries list array");
     assert!(
-        entries.iter().any(
-            |entry| entry.get("Name").and_then(serde_json::Value::as_str) == Some("hello.txt")
-        ),
+        !listing.starts_with("{\""),
+        "ls output must be a rendered table, not raw json: {listing}"
+    );
+    assert!(
+        listing
+            .lines()
+            .next()
+            .is_some_and(|header| header.starts_with("NAME")),
+        "ls output must carry the table header: {listing}"
+    );
+    assert!(
+        listing.lines().any(|line| line.contains("hello.txt")),
         "fixture file must be listed: {listing}"
     );
 
