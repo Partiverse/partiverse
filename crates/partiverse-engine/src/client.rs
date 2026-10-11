@@ -58,6 +58,7 @@ rc_methods!(
     ConfigDelete => "config/delete", ConfigDump => "config/dump", ConfigProviders => "config/providers",
     OperationsList => "operations/list", OperationsStat => "operations/stat", OperationsAbout => "operations/about",
     OperationsCopyfile => "operations/copyfile", OperationsMovefile => "operations/movefile", OperationsDelete => "operations/delete",
+    OperationsDeletefile => "operations/deletefile", OperationsPurge => "operations/purge",
     OperationsMkdir => "operations/mkdir", OperationsUploadfile => "operations/uploadfile", OperationsPubliclink => "operations/publiclink",
     JobStatus => "job/status", JobList => "job/list", JobStop => "job/stop",
     CoreStats => "core/stats", CoreVersion => "core/version", CoreBwlimit => "core/bwlimit",
