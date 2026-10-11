@@ -29,6 +29,8 @@ usage:
   partiverse-cli engine install|status|ensure|probe|shutdown
   partiverse-cli connection create-local <name> --path <path>
   partiverse-cli connection create-webdav <name> --url <url> --user <user> --pass <pass>
+  partiverse-cli connection create-123 <name> --url <url> --user <user> --pass <pass>
+                                                      (123pan official WebDAV; VIP account + https console endpoint required)
   partiverse-cli connection list
   partiverse-cli connection delete <name>
   partiverse-cli ls <remote:path>
@@ -120,6 +122,20 @@ fn connection_body(
             // 凭据红线:pass 仅入注入通道,零日志零回显(错误路径 core redact 兜底)。
             connection::create_webdav(dispatch, &name, &url, &user, &pass)?;
             Ok(format!("connection created: {name} (webdav)"))
+        }
+        Some("create-123") => {
+            ensure_shape(parsed, 2, &["--url", "--user", "--pass"])?;
+            let name = positional(
+                parsed,
+                1,
+                "connection create-123 <name> --url --user --pass",
+            )?;
+            let url = flag(parsed, "--url")?;
+            let user = flag(parsed, "--user")?;
+            let pass = flag(parsed, "--pass")?;
+            // 凭据红线:pass 仅入注入通道,零日志零回显(错误路径 core redact 兜底)。
+            connection::create_123(dispatch, &name, &url, &user, &pass)?;
+            Ok(format!("connection created: {name} (webdav, 123pan)"))
         }
         Some("list") => {
             ensure_shape(parsed, 1, &[])?;

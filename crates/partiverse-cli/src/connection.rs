@@ -1,5 +1,6 @@
-//! connection 子命令(M1-WP07-T01 卡内 ②):create-local / create-webdav /
-//! list / delete,全部透传 crates(core `schema::create_remote` 注入通道 +
+//! connection 子命令(M1-WP07-T01 卡内 ②;M1-WP07-T04 拆分):create-local /
+//! create-webdav(通用)/ create-123(123 专属)/ list / delete,全部透传
+//! crates(core `schema::create_remote` 注入通道 + 通用 webdav 直注 +
 //! `pan123::webdav_remote` 形态构造 + rc 白名单 config/*),CLI 零业务逻辑。
 //! 凭据红线:`--pass` 参数全程零日志零错误消息(core 注入通道错误路径已对全部
 //! 参数值 redact 兜底);connection list 只出 name+type,零参数值。
@@ -40,15 +41,41 @@ pub fn create_local(
     assert_type_readback(dispatch, name, "alias")
 }
 
-/// `connection create-webdav <name> --url --user --pass`:123 官方 WebDAV 形态
-/// (core `pan123::webdav_remote` 构造:url/vendor/user/pass 四参数;端点用户
-/// 粘贴零硬编码,密码逐字符保真)→ core `create_remote` 注入(obscure 落加密
-/// config;config 加密接线不在本卡,D27 过渡件债务与壳层同口径)。
+/// `connection create-webdav <name> --url --user --pass`:通用 WebDAV 端点接入
+/// (M1-WP07-T04 拆分:D3 dogfood 缺陷修复——原命令被 123 专属校验硬编码,
+/// 任意通用 WebDAV 端点(含自建/http)无法经 CLI 建立)。type=webdav,
+/// url/user/pass 三参数直注 core `create_remote` 注入通道——零 123 校验、
+/// 零端点协议限制(http/https 均为 webdav 后端合法语义;端点用户粘贴零
+/// 硬编码,密码逐字符保真);vendor 不注入(引擎钉定 rclone 1.75.1
+/// `rclone help backend webdav` 实测 vendor Required:false,缺省走后端默认)。
+/// obscure 落加密 config(config 加密接线不在本卡,D27 过渡件债务与壳层同口径)。
 ///
 /// # Errors
-/// 表单校验失败(端点非 https 等)或 `config/create` 被拒 → core 错误原样上浮
-/// (错误载荷零用户粘贴值,core 已脱敏)。
+/// `config/create` 被拒 → core 错误原样上浮(错误载荷零用户粘贴值,core 已脱敏)。
 pub fn create_webdav(
+    dispatch: &impl RcDispatch,
+    name: &str,
+    url: &str,
+    user: &str,
+    pass: &str,
+) -> Result<(), PartisyError> {
+    let remote = RemoteCreate::new(name, "webdav")
+        .with_parameter("url", url.to_owned())
+        .with_parameter("user", user.to_owned())
+        .with_parameter("pass", pass.to_owned());
+    create_remote(dispatch, &remote)?;
+    assert_type_readback(dispatch, name, "webdav")
+}
+
+/// `connection create-123 <name> --url --user --pass`:123 官方 WebDAV 形态
+/// (M1-WP07-T04 拆分承接:123 专属校验 https + 控制台端点由 core
+/// `pan123::webdav_remote` **原样迁移**(零改动零放宽),CLI 零校验逻辑;
+/// vendor=user/pass 四参数由 core 构造,与 WP04-T03 交付形态逐字节一致)。
+///
+/// # Errors
+/// 表单校验失败(端点非 https 等,`invalid 123pan webdav input` 上浮)或
+/// `config/create` 被拒 → core 错误原样上浮(错误载荷零用户粘贴值,core 已脱敏)。
+pub fn create_123(
     dispatch: &impl RcDispatch,
     name: &str,
     url: &str,
