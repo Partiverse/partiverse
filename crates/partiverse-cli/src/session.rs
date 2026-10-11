@@ -2,13 +2,32 @@
 //! 适配器(壳 state.rs:92-100 形态,白名单收口 + severity 保真,零透传)+
 //! 按次启动会话(`ensure → 执行 → shutdown on exit`;`RcdLaunch` Drop 兜底
 //! kill,CLI 退出 = 引擎退出 = 运行中 job 终止,任务卡显式声明)。
+//!
+//! M1-WP99-T03 加密 config 生产接线(卡内 ②③④):所有引擎类子命令经
+//! [`Session::open`]/[`Session::open_with_slot`] 统一走同一条注入链路——
+//! rclone 默认 config 路径解析(`rclone config file` 官方接口,零硬编码)→
+//! core Fail-closed 注入决策 → 已加密 = `spawn_with_config`(取密命令
+//! `cat "<master.key>"`,argv 零密钥);明文/缺失 = 原样无注入启动 + stderr
+//! 提示;已加密而密钥文件缺失 = 显式 Fatal「master key missing: config
+//! undecryptable」,禁止降级明文启动。
 
+use std::path::Path;
+
+use partiverse_core::credential_store::{self, ConfigInjectionDecision};
 use partiverse_core::error::PartisyError;
 use partiverse_core::jobs::RcDispatch;
 use partiverse_engine::coordinator::{EngineCoordinator, EngineHandle};
+use partiverse_engine::rcd::resolve_default_config_path;
 use partiverse_engine::slots::{DEFAULT_SLOT_ID, EngineSlotConfig};
-use partiverse_engine::{EngineError, RcClient, RcMethod};
+use partiverse_engine::{ConfigInjection, EngineError, RcClient, RcMethod};
 use serde_json::Value;
+
+use crate::config::map_credential_error;
+
+/// 明文 config 提示(卡内 ②;stderr 提示面,数据通道零污染;文案含 DoD 原文
+/// 「run pv config encrypt to enable」)。pub 供测试锚定文案。
+pub const ENCRYPT_HINT: &str =
+    "note: rclone config is not encrypted; run `pv config encrypt` to enable";
 
 /// `RcClient` → `RcDispatch` 生产适配(卡内 ③,≈10 行;壳 `ShellDispatch`
 /// 形态:白名单收口 + severity 保真,零透传)。
@@ -46,9 +65,19 @@ impl Session {
     }
 
     /// 以显式槽位配置开启会话(测试注入隔离 cache_dir 用;生产走 [`Self::open`])。
+    /// 注入链路 = [`default_config_injection`](卡内 ③ 全引擎子命令统一)。
     pub fn open_with_slot(slot: &EngineSlotConfig) -> Result<Self, EngineError> {
+        Self::open_with_slot_and_config(slot, default_config_injection)
+    }
+
+    /// 以显式注入解析器开启会话(测试缝:隔离 config 面注入,零触碰用户真实
+    /// 默认 config;生产走 [`Self::open_with_slot`])。
+    pub fn open_with_slot_and_config(
+        slot: &EngineSlotConfig,
+        config: impl FnOnce(&Path) -> Result<Option<ConfigInjection>, EngineError>,
+    ) -> Result<Self, EngineError> {
         let mut coordinator = EngineCoordinator::new()?;
-        let handle = coordinator.ensure(slot)?;
+        let handle = coordinator.ensure_with_config(slot, config)?;
         let dispatch = EngineDispatch {
             client: handle.rc_client.clone(),
         };
@@ -80,5 +109,29 @@ impl Session {
     /// kill——`RcdLaunch` Drop 契约,进程零残留)。
     pub fn shutdown(&mut self) -> Result<(), EngineError> {
         self.coordinator.shutdown(DEFAULT_SLOT_ID)
+    }
+}
+
+/// 生产注入解析器(卡内 ②③④,单点收口):rclone 默认 config 路径解析 →
+/// core Fail-closed 决策 → `Some(ConfigInjection)`(已加密,取密命令
+/// `cat "<master.key>"`,argv 零密钥)/ `None`(明文/缺失,原样启动 + stderr
+/// 提示);加密 config 而密钥文件缺失 = Fatal 上浮(DoD ④,禁降级)。
+///
+/// # Errors
+/// 路径解析失败 / core 决策失败 → `ConfigInjectionUnresolved`(severity 保真:
+/// 缺密钥 = Fatal Fail-closed;探测 IO 按表驱动)。
+pub fn default_config_injection(binary: &Path) -> Result<Option<ConfigInjection>, EngineError> {
+    let config_path = resolve_default_config_path(binary)?;
+    let decision =
+        credential_store::decide_config_injection(&config_path).map_err(map_credential_error)?;
+    match decision {
+        ConfigInjectionDecision::Inject { password_command } => Ok(Some(ConfigInjection {
+            config_path,
+            password_command,
+        })),
+        ConfigInjectionDecision::Plaintext => {
+            eprintln!("{ENCRYPT_HINT}");
+            Ok(None)
+        }
     }
 }

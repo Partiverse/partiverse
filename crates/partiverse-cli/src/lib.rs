@@ -9,6 +9,7 @@
 //! 错误经 `error_chain` 出 stderr + 退出码 0/1(engine-install bin 先例)。
 
 pub mod browse;
+pub mod config;
 pub mod connection;
 pub mod engine;
 pub mod fsops;

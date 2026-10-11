@@ -22,6 +22,7 @@ use partiverse_core::jobs::{JobManager, JobStatus};
 use partiverse_engine::error::error_chain;
 
 use partiverse_cli::browse;
+use partiverse_cli::config;
 use partiverse_cli::connection;
 use partiverse_cli::engine;
 use partiverse_cli::fsops;
@@ -33,6 +34,7 @@ const USAGE: &str = "partiverse-cli
 
 usage:
   partiverse-cli engine install|status|ensure|probe|shutdown
+  partiverse-cli config encrypt                        (encrypt rclone config; master key file 0600; idempotent)
   partiverse-cli connection create-local <name> --path <path>
   partiverse-cli connection create-webdav <name> --url <url> --user <user> --pass <pass>
   partiverse-cli connection create-123 <name> --url <url> --user <user> --pass <pass>
@@ -83,6 +85,7 @@ fn main() -> ExitCode {
 fn run(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
     match args.first().map(String::as_str) {
         Some("engine") => engine_command(args.get(1).map(String::as_str)),
+        Some("config") => config_command(args.get(1).map(String::as_str)),
         Some("connection") => connection_command(&args[1..]),
         Some("ls") => ls_command(&args[1..]),
         Some("mkdir") => mkdir_command(&args[1..]),
@@ -90,6 +93,15 @@ fn run(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
         Some("copy") => transfer_command(&args[1..], false),
         Some("move") => transfer_command(&args[1..], true),
         Some("jobs") => jobs_command(&args[1..]),
+        _ => Err(Box::new(UsageError::new(USAGE))),
+    }
+}
+
+/// config 子命令面(M1-WP99-T03:encrypt = rclone config 加密生产接线,
+/// 透传 cli::config,CLI 零业务逻辑)。
+fn config_command(sub: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
+    match sub {
+        Some("encrypt") => Ok(config::encrypt()?),
         _ => Err(Box::new(UsageError::new(USAGE))),
     }
 }
