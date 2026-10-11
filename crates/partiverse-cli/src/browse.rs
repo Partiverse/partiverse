@@ -133,14 +133,16 @@ fn format_mod_time(raw: &str) -> String {
     };
     let bytes = rest.as_bytes();
     // 时间段 `HH:MM:SS` 形状核验(第 3/6 字节为冒号),不符 = 原样透传。
-    if bytes.len() < 8 || bytes[2] != b':' || bytes[5] != b':' {
+    // 非 ASCII = 违背 rclone lsjson 契约的畸形串,原样透传(审查 [medium]:
+    // 字节索引切片在多字节输入上会 panic;ASCII 核验一次到位,零 panic 承诺)。
+    if bytes.len() < 8 || bytes[2] != b':' || bytes[5] != b':' || !rest.is_ascii() {
         return raw.to_owned();
     }
     let tail = &rest[8..];
     let offset = if tail.ends_with('Z') {
         "Z"
     } else {
-        // 分数秒只有数字与点,首个 `+`/`-` 即时区偏移起点。
+        // 分数秒只有数字与点,首个 `+`/`-` 即时区偏移起点(ASCII 已核验,切片安全)。
         tail.find(['+', '-']).map_or("", |start| &tail[start..])
     };
     format!("{date} {}{offset}", &rest[..8])
@@ -266,6 +268,21 @@ mod tests {
                 "odd.txt   file   7 B  not-a-timestamp",
             ],
             "Size/ModTime 缺失 → `-`;ModTime 形状不符原样透传"
+        );
+    }
+
+    #[test]
+    fn format_mod_time_never_panics_on_multibyte_malformed_input() {
+        // 审查 [medium]:字节索引切片在多字节畸形 ModTime 上 panic 的回归防护。
+        // 形状匹配(第 3/6 字节冒号)但切片点落在多字节字符内部 → 原样透传。
+        let multibyte = "2026-10-11T12:34:5éfé";
+        assert_eq!(format_mod_time(multibyte), multibyte);
+        let multibyte_offset = "2026-10-11T12:34:56é+08:00";
+        assert_eq!(format_mod_time(multibyte_offset), multibyte_offset);
+        // 合法 ASCII 输入不受防护影响(既有行为回归)。
+        assert_eq!(
+            format_mod_time("2026-10-11T12:34:56.789+08:00"),
+            "2026-10-11 12:34:56+08:00"
         );
     }
 }
