@@ -65,7 +65,8 @@ export function TransferDialog({ open, isMove, entries, srcRoot, node, onClose, 
       }
       setChecking(true);
       commands
-        .operationsList(dst.trim())
+        // operations/list 两键齐传(remote 空串合法,T09 实测形状:仅 fs = 400)。
+        .operationsList(dst.trim(), "")
         .then((result) => {
           if (cancelled) return;
           if (result.status === "error") throw new Error(`${result.error.kind}: ${result.error.msg}`);

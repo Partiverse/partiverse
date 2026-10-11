@@ -1,16 +1,19 @@
 // 添加 Node 向导(DoD①②③):四分支 ≤3 步(Provider→Configure→Review & Connect);RHF+zod
 // 动态表单消费 WP04 providers_fetch 描述模型(协议类高级项折叠);提交前一律预览-提交对话框
 // (secret 脱敏走 lib/wizard/model,禁入日志/localStorage);完成即轻探针体检(预算 acquire 前置
-// +operations/list 单次)。仅 123 分支有已交付 IPC 创建通道,其余分支显式上浮「通道未交付」
-// 错误态(禁静默/禁伪造成功);文案全走 i18n(仅英文)。
+// +operations/list 单次)。创建通道接线(M1-WP05-T09):pan123=connection_create_123、
+// 协议类=connection_create_protocol(config/create 透传+config/get 回读,壳侧断言)、
+// local=免 config 直浏览家目录(实测 schema 仅 advanced 可选项);oauth/baidu 显式上浮
+// 「通道未交付」错误态(T08 裁定维持,禁静默/禁伪造成功);文案全走 i18n(仅英文)。
 import { Dialog } from "radix-ui";
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useForm, type UseFormReturn } from "react-hook-form";
 import { commands, type CmdError, type FieldDesc, type ProviderFormOut } from "@/bindings";
 import { parseDirListing } from "@/lib/browse/model";
 import { t } from "@/i18n";
 import {
   aggregateProbe, branchGroupKey, branchGuidanceKeys, buildDefaultValues, buildZodSchema, createChannel,
+  collectProtocolParameters, isLocalProvider,
   PAN123_FIELDS, BAIDU_FIELDS, redactValues, routeBranch, type ProbeOutcome, type WizardBranch,
 } from "@/lib/wizard/model";
 import { Button } from "@/components/ui/button";
@@ -35,8 +38,19 @@ const envelopeError = (error: CmdError): string => `${error.kind}: ${error.msg}`
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : JSON.stringify(err));
 const asString = (value: string | boolean | undefined): string => (typeof value === "string" ? value : "");
 const fieldLabel = (name: string): string => (FIELD_LABEL_KEYS[name] !== undefined ? t(FIELD_LABEL_KEYS[name]) : name);
-const fieldsFor = (selection: Selection): FieldDesc[] =>
-  selection.branch === "pan123" ? PAN123_FIELDS : selection.branch === "baidu" ? BAIDU_FIELDS : selection.provider.fields;
+/** 协议类 remote 命名合成字段:provider options 无 name 项(rclone remote 名
+ *  独立于 options,config/create 顶层 name 参数),用户输入经合成字段收集
+ *  (PAN123_FIELDS 同款先例);提交时经 collectProtocolParameters 排除。 */
+const PROTOCOL_NAME_FIELD: FieldDesc = {
+  name: "name", field_type: "string", required: true, is_password: false, advanced: false, exclusive: false, default: null,
+};
+const fieldsFor = (selection: Selection): FieldDesc[] => {
+  if (selection.branch === "pan123") return PAN123_FIELDS;
+  if (selection.branch === "baidu") return BAIDU_FIELDS;
+  // local 分支(DoD④):免 config,零表单字段(选择即直入完成流)。
+  if (isLocalProvider(selection.provider.name)) return [];
+  return [PROTOCOL_NAME_FIELD, ...selection.provider.fields];
+};
 
 /** provider schema 拉取(模块级:不捕获 setState,零同步副作用的可复用结果函数)。 */
 async function fetchProviderForms(): Promise<FetchOutcome> {
@@ -185,24 +199,34 @@ export function AddNodeWizard({ open, onClose }: { open: boolean; onClose: () =>
     setSelected(selection);
     form.reset(buildDefaultValues(fieldsFor(selection)));
     setSubmit({ kind: "idle" });
+    // local 分支(DoD④):免 config——跳过 Configure 直入 Review(预览零行)。
+    if (selection.branch === "protocol" && isLocalProvider(provider.name)) {
+      setStep(3);
+      setPreviewOpen(true);
+      return;
+    }
     setStep(2);
   };
 
-  // 轻探针(DoD③):预算 acquire 前置(throttled/exhausted 零引擎触达),放行后 operations/list 单次。
-  const runProbe = useCallback(async (remoteName: string) => {
+  // 轻探针(DoD③):预算 acquire 前置(throttled/exhausted 零引擎触达),放行后
+  // operations/list 单次(两键齐传,remote 空串合法——T09 实测形状)。目标由调用方
+  // 给定:协议类/123 = `name:`(remote 根),local = 家目录裸路径;记录最近目标供重试。
+  const probeTargetRef = useRef<{ node: string; fs: string } | null>(null);
+  const runProbe = useCallback(async (node: string, fs: string) => {
+    probeTargetRef.current = { node, fs };
     setSubmit({ kind: "busy", stage: "probing" });
     try {
-      const budget = await commands.budgetAcquire(remoteName, 1);
+      const budget = await commands.budgetAcquire(node, 1);
       if (budget.status === "error") {
         setSubmit({ kind: "error", message: envelopeError(budget.error) });
       } else if (budget.data !== "allow") {
         setSubmit({ kind: "probe", outcome: aggregateProbe({ budget: budget.data, list: null }) });
       } else {
-        const list = await commands.operationsList(`${remoteName}:`);
+        const list = await commands.operationsList(fs, "");
         if (list.status === "error") {
           setSubmit({ kind: "probe", outcome: aggregateProbe({ budget: "allow", list: { ok: false, error: envelopeError(list.error) } }) });
         } else {
-          const parsed = parseDirListing(list.data, "/", remoteName);
+          const parsed = parseDirListing(list.data, "/", node);
           setSubmit({
             kind: "probe",
             outcome: aggregateProbe({ budget: "allow", list: parsed.ok ? { ok: true, entries: parsed.entries.length } : { ok: false, error: parsed.error } }),
@@ -214,20 +238,50 @@ export function AddNodeWizard({ open, onClose }: { open: boolean; onClose: () =>
     }
   }, []);
 
+  const retryProbe = useCallback(() => {
+    const target = probeTargetRef.current;
+    if (target !== null) void runProbe(target.node, target.fs);
+  }, [runProbe]);
+
   const confirmConnect = useCallback(async () => {
     if (selected === null) return;
     setPreviewOpen(false);
-    if (createChannel(selected.branch) === null) {
-      // 通道守卫(model):其余分支无已交付 IPC 通道——显式上浮,禁静默/禁伪造成功。
+    const channel = createChannel(selected.branch);
+    if (channel === null) {
+      // 通道守卫(model):oauth/baidu 无已交付 IPC 通道——显式上浮,禁静默/禁伪造成功。
       setSubmit({ kind: "channel", message: t("wizard.channelUnavailable") });
       return;
     }
     const values = form.getValues();
     setSubmit({ kind: "busy", stage: "creating" });
     try {
-      const result = await commands.connectionCreate123(asString(values.name), asString(values.endpoint), asString(values.account), asString(values.app_password));
-      if (result.status === "error") setSubmit({ kind: "error", message: envelopeError(result.error) });
-      else await runProbe(asString(values.name));
+      if (channel === "connection_create_123") {
+        const result = await commands.connectionCreate123(asString(values.name), asString(values.endpoint), asString(values.account), asString(values.app_password));
+        if (result.status === "error") {
+          setSubmit({ kind: "error", message: envelopeError(result.error) });
+          return;
+        }
+        await runProbe(asString(values.name), `${asString(values.name)}:`);
+      } else if (isLocalProvider(selected.provider.name)) {
+        // local 分支(DoD④):免 config 直浏览家目录——体检=家目录真列举
+        // (裸路径 fs + remote 空串,实测形状),完成态走同一 ProbePanel。
+        const home = await commands.userHomeDir();
+        if (home.status === "error") {
+          setSubmit({ kind: "error", message: envelopeError(home.error) });
+          return;
+        }
+        await runProbe("local", home.data);
+      } else {
+        // 协议类(DoD④):提交 → 壳 config/create 透传 + config/get 回读断言
+        // (壳侧单点收口)→ remote 根探针完成态。secret 原值仅经 IPC 通道。
+        const parameters = collectProtocolParameters(fieldsFor(selected), values);
+        const result = await commands.connectionCreateProtocol(asString(values.name), selected.provider.name, parameters);
+        if (result.status === "error") {
+          setSubmit({ kind: "error", message: envelopeError(result.error) });
+          return;
+        }
+        await runProbe(asString(values.name), `${asString(values.name)}:`);
+      }
     } catch (err) {
       setSubmit({ kind: "error", message: errorText(err) });
     }
@@ -309,7 +363,7 @@ export function AddNodeWizard({ open, onClose }: { open: boolean; onClose: () =>
             ) : submit.kind === "busy" ? (
               <p aria-busy="true" className="text-sm">{submit.stage === "creating" ? t("wizard.creating") : t("wizard.probe.running")}</p>
             ) : submit.kind === "probe" ? (
-              <ProbePanel outcome={submit.outcome} onRetry={() => void runProbe(asString(form.getValues().name))} onDone={close} />
+              <ProbePanel outcome={submit.outcome} onRetry={retryProbe} onDone={close} />
             ) : (
               <div role="alert" className="flex flex-col items-start gap-2">
                 <p className="text-sm text-destructive">{submit.kind === "channel" ? t("wizard.channelTitle") : t("wizard.errorTitle")}</p>

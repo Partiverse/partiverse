@@ -8,6 +8,7 @@ use std::sync::Arc;
 use partiverse_core::budget::{Decision, GatedSubmit, JobSpec};
 use partiverse_core::jobs::{JobStatus, RcDispatch};
 use partiverse_core::oauth::{BaiduOAuthFlow, ClientCredentials, OAuthTokenSink};
+use partiverse_core::schema::{create_remote, RemoteCreate};
 use partiverse_engine::slots::{EngineSlotConfig, DEFAULT_SLOT_ID};
 use serde_json::Value;
 // `package_info` 在 Tauri 2 里是 AppHandle 的固有方法,无需 Manager trait(cargo check 实证)。
@@ -159,19 +160,149 @@ pub async fn baidu_exchange_code(
     .await
 }
 
-/// 浏览数据源:rc 白名单 `operations/list` 单目录列举(fs = "remote:path");
-/// 载荷 JSON 文本原样透传(壳零字段裁剪、零 schema 发明;理由见 dto.rs)。
+/// 协议类通道创建(M1-WP05-T09 DoD①,修复 F1「Create channel not available」):
+/// 前端表单值以 JSON 文本过线(T01 specta 口径,动态 JSON 一律 String),经
+/// ShellDispatch 透传 rc `config/create`(白名单内;core `create_remote` 复用,
+/// core 零改动)。成功后立即 `config/get` 回读断言(DoD④「真建 remote→回读」
+/// 在壳单点收口,向导与集成测试同消费面)。
+///
+/// # rc 形状实机锚定(2026-10-11,宿主件 = 引擎钉定 rclone v1.75.1,禁凭记忆)
+/// - `config/create` 入参 `{"name","type","parameters","obscure"}`:local 后端
+///   `parameters:{}` → 200 `{}`;alias 后端 `parameters:{"remote":"<目标>"}` →
+///   200 `{}`;同名重复创建 = 静默覆盖(200);未知 backend → 500(与 T03/T08
+///   实测记录一致)。`obscure:true` 显式化(core `create_remote` 已固化)。
+/// - `config/get` 入参 `{"name"}` → 回读扁平 remote 配置,恒含 `type` 键
+///   (local 实测回 `{"type":"local"}`;alias 回 `{"remote":…,"type":"alias"}`)。
+///
+/// # 凭据过壳纪律(R2 口径)
+/// parameters 文本可含密码明文:解析失败错误只含 serde 根因零原文回显;core
+/// `create_remote` 错误路径已对全部参数值 `redact` 兜底;壳全程零日志,Debug
+/// 面(`RemoteCreate` 手写)只出键名零值。
+///
+/// # Errors
+/// parameters 非 JSON 对象 → Internal Fatal(零原文回显);rc 失败 → Core
+/// (severity 保真,值已脱敏);回读 `type` 不符 → Core Fatal(结构化,零参数值)。
 #[tauri::command]
 #[specta::specta]
-pub async fn operations_list(state: State<'_, ShellState>, fs: String) -> Result<String, CmdError> {
+pub async fn connection_create_protocol(
+    state: State<'_, ShellState>,
+    remote_name: String,
+    backend_type: String,
+    parameters: String,
+) -> Result<(), CmdError> {
     let dispatch = state.dispatch()?;
     run_blocking(move || {
-        dispatch
-            .call("operations/list", &serde_json::json!({ "fs": fs }))
-            .map_err(CmdError::from)
-            .map(|reply| reply.to_string())
+        let parsed: Value = serde_json::from_str(&parameters).map_err(|err| {
+            // 错误消息只含 serde 解析根因,零原文回显(parameters 可含密码明文)。
+            CmdError::new(
+                ErrorKind::Internal,
+                Severity::Fatal,
+                format!("connection_create_protocol: parameters must be a JSON object: {err}"),
+            )
+        })?;
+        connection_create_protocol_inner(&dispatch, &remote_name, &backend_type, &parsed)
     })
     .await
+}
+
+/// [`connection_create_protocol`] 的同步体(向导与真引擎测试同消费面):
+/// parameters JSON 对象 → `RemoteCreate`(core `create_remote` 白名单透传)
+/// → `config/get` 回读断言 `type` 一致(回包扁平配置恒含 `type`,实测锚定)。
+///
+/// # Errors
+/// 见 [`connection_create_protocol`]。
+pub(crate) fn connection_create_protocol_inner(
+    dispatch: &impl RcDispatch,
+    remote_name: &str,
+    backend_type: &str,
+    parameters: &Value,
+) -> Result<(), CmdError> {
+    let object = parameters.as_object().ok_or_else(|| {
+        CmdError::new(
+            ErrorKind::Internal,
+            Severity::Fatal,
+            "connection_create_protocol: parameters must be a JSON object",
+        )
+    })?;
+    let mut remote = RemoteCreate::new(remote_name, backend_type);
+    for (key, value) in object {
+        remote = remote.with_parameter(key.clone(), value.clone());
+    }
+    create_remote(dispatch, &remote).map_err(CmdError::from)?;
+    let reply = dispatch
+        .call("config/get", &serde_json::json!({ "name": remote_name }))
+        .map_err(CmdError::from)?;
+    let readback = reply.get("type").and_then(Value::as_str);
+    if readback != Some(backend_type) {
+        // 回读断言失败:只报事实键值(非凭据),零参数值入载荷。
+        return Err(CmdError::new(
+            ErrorKind::Core,
+            Severity::Fatal,
+            format!(
+                "connection_create_protocol: config/get readback type mismatch for remote \
+                 `{remote_name}`: expected `{backend_type}`, got `{}`",
+                readback.unwrap_or("<missing>")
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// 用户家目录(M1-WP05-T09 DoD③,修复 F3 浏览默认根=/):unix 解析 `HOME`、
+/// windows 解析 `USERPROFILE`,零硬编码路径;缺失/空值 = Config Fatal 上浮,
+/// 禁静默回退(回退 = 把权限问题藏成 UX 缺陷)。前端消费点 = 浏览默认根。
+#[tauri::command]
+#[specta::specta]
+pub fn user_home_dir() -> Result<String, CmdError> {
+    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    // ErrorKind::Config 首个生产构造点(此前仅有测试构造,expect 属性已撤)。
+    std::env::var(key)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            CmdError::new(
+                ErrorKind::Config,
+                Severity::Fatal,
+                format!("user home directory env var `{key}` is missing or empty"),
+            )
+        })
+}
+
+/// 浏览数据源:rc 白名单 `operations/list` 单目录列举(fs = "remote:path";
+/// 载荷 JSON 文本原样透传(壳零字段裁剪、零 schema 发明;理由见 dto.rs)。
+///
+/// # rc 形状实机锚定(2026-10-11,rclone v1.75.1,修复 F2 浏览空白)
+/// `operations/list` 要求 `fs` 与 `remote` 两键齐备:仅 `fs` → 400 `Didn't
+/// find key "remote" in input`(T01 形状记忆缺口的实锤);`remote:""` 合法
+/// (列举 fs 根);裸路径 fs(local 后端)+ `remote:""` → 200,`operations/
+/// mkdir` 同形状实测落盘成功。T09 起两键恒齐传。
+#[tauri::command]
+#[specta::specta]
+pub async fn operations_list(
+    state: State<'_, ShellState>,
+    fs: String,
+    remote: String,
+) -> Result<String, CmdError> {
+    let dispatch = state.dispatch()?;
+    run_blocking(move || operations_list_inner(&dispatch, &fs, &remote)).await
+}
+
+/// [`operations_list`] 的同步体(真引擎测试同消费面;两键齐传,remote 空串合法)。
+///
+/// # Errors
+/// rc 失败按引擎 severity 保真映射 Core 上浮(零吞错)。
+pub(crate) fn operations_list_inner(
+    dispatch: &impl RcDispatch,
+    fs: &str,
+    remote: &str,
+) -> Result<String, CmdError> {
+    dispatch
+        .call(
+            "operations/list",
+            &serde_json::json!({ "fs": fs, "remote": remote }),
+        )
+        .map_err(CmdError::from)
+        .map(|reply| reply.to_string())
 }
 
 /// 预算决策查询(core 预算器 acquire,供前端提交前预估等待;cost 取 u32——
@@ -420,4 +551,206 @@ pub async fn jobs_reconcile(state: State<'_, ShellState>) -> Result<Vec<JobRecor
         Ok(records.into_iter().map(JobRecordOut::from).collect())
     })
     .await
+}
+
+/// T09 真引擎测试(unix 门;真 rclone 1.75.1 离线,零真实网络:后端仅 local/
+/// alias,config 只存不连)。纪律:与 core 集成测试同款——预装引擎预检防误触
+/// 下载、进程内串行(安装根共享)、测试 remote `config/delete` 清场零残留。
+#[cfg(all(test, unix))]
+mod real_engine_tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    use partiverse_core::error::PartisyError;
+    use partiverse_engine::{
+        EngineCoordinator, EngineInstaller, EngineManifest, EngineSlotConfig, DEFAULT_SLOT_ID,
+    };
+    use serde_json::json;
+
+    use super::*;
+    use crate::state::ShellDispatch;
+
+    /// 集成测试进程内串行(引擎安装根共享路径,core 集成同款纪律)。
+    fn test_serial_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// 预装引擎预检(防误触网络下载;缺失 → 显式失败+安装指引)。
+    fn require_preinstalled_engine() -> PathBuf {
+        let root = EngineInstaller::resolve_install_root().expect("engine install root resolvable");
+        let manifest = EngineManifest::embedded().expect("embedded manifest parses");
+        let asset = manifest.current_platform().expect("host platform asset");
+        let binary = root.join(&manifest.version).join(&asset.binary_name);
+        assert!(
+            binary.is_file(),
+            "rclone missing at {}; run engine-install",
+            root.display()
+        );
+        binary
+    }
+
+    /// 真引擎沙箱:独立临时工作区 + 槽位缓存隔离 + ShellDispatch 测试构造面。
+    struct TestEngine {
+        /// 持有协调器(rcd 子进程随 Drop 生命周期管理,测试期必须存活)。
+        _coordinator: EngineCoordinator,
+        dispatch: ShellDispatch,
+        work: PathBuf,
+    }
+
+    fn spawn_engine(tag: &str) -> TestEngine {
+        // 预装预检(缺失即失败,防协调器误触网络下载);二进制定位由协调器按
+        // 槽位 engine_root 自理,此处仅校验存在性。
+        require_preinstalled_engine();
+        let work =
+            std::env::temp_dir().join(format!("partiverse-shell-t09-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&work); // 上轮残留清理(测试沙箱路径,非生产)
+        let mut slot = EngineSlotConfig::load_default(DEFAULT_SLOT_ID).expect("default slot loads");
+        slot.cache_dir = work.join("cache");
+        fs::create_dir_all(&slot.cache_dir).expect("create test cache dir");
+        let mut coordinator = EngineCoordinator::new().expect("coordinator constructs");
+        let handle = coordinator.ensure(&slot).expect("ensure engine");
+        TestEngine {
+            _coordinator: coordinator,
+            dispatch: ShellDispatch::for_tests(handle.rc_client.clone()),
+            work,
+        }
+    }
+
+    /// 收场清场:测试 remote `config/delete`(白名单内)零残留。
+    fn cleanup_remotes(dispatch: &ShellDispatch, names: &[&str]) {
+        for name in names {
+            dispatch
+                .call("config/delete", &json!({ "name": name }))
+                .expect("cleanup config/delete");
+        }
+    }
+
+    /// 拒触引擎替身:非对象参数必须在触达 rc 前结构化拒绝(命中 call 即败)。
+    struct FakeNoCallDispatch;
+
+    impl RcDispatch for FakeNoCallDispatch {
+        fn call(&self, method: &str, _params: &Value) -> Result<Value, PartisyError> {
+            panic!("dispatch must not be touched, but got {method}");
+        }
+    }
+
+    #[test]
+    fn connection_create_protocol_local_and_alias_readback_on_real_engine() {
+        let _serial = test_serial_lock().lock().expect("serial lock");
+        let engine = spawn_engine("create");
+        // local 后端:parameters 空对象(实测最小形状),inner 自带 config/get
+        // 回读 type 断言(失败即 Err)。
+        connection_create_protocol_inner(&engine.dispatch, "pv-shell-local", "local", &json!({}))
+            .expect("local create + readback ok");
+        // alias 后端:parameters.remote 指向本地临时目录(实测键名 = remote)。
+        let target = engine.work.to_string_lossy().to_string();
+        connection_create_protocol_inner(
+            &engine.dispatch,
+            "pv-shell-alias",
+            "alias",
+            &json!({ "remote": target }),
+        )
+        .expect("alias create + readback ok");
+        // DoD「config/get 回读」显式面:扁平配置恒含 type,与创建类型一致。
+        for (name, expected) in [("pv-shell-local", "local"), ("pv-shell-alias", "alias")] {
+            let reply = engine
+                .dispatch
+                .call("config/get", &json!({ "name": name }))
+                .expect("config/get ok");
+            assert_eq!(reply.get("type").and_then(Value::as_str), Some(expected));
+        }
+        cleanup_remotes(&engine.dispatch, &["pv-shell-local", "pv-shell-alias"]);
+    }
+
+    #[test]
+    fn operations_list_requires_and_uses_remote_key_on_real_engine() {
+        let _serial = test_serial_lock().lock().expect("serial lock");
+        let engine = spawn_engine("list");
+        fs::write(engine.work.join("seed.txt"), "seed").expect("seed file");
+        let target = engine.work.to_string_lossy().to_string();
+        connection_create_protocol_inner(
+            &engine.dispatch,
+            "pv-shell-list",
+            "alias",
+            &json!({ "remote": target }),
+        )
+        .expect("alias create + readback ok");
+        // F2 根因锚定:仅 fs 单键(修复前形状)→ 引擎 400 拒绝,错误文本点名
+        // remote 键缺失(T01 形状记忆缺口的实机实锤)。
+        let err = engine
+            .dispatch
+            .call("operations/list", &json!({ "fs": "pv-shell-list:" }))
+            .expect_err("fs-only shape must be rejected by engine");
+        assert!(
+            err.to_string().contains("remote"),
+            "engine error must name the missing key: {err}"
+        );
+        // 修复后形状(两键齐传,remote 空串合法)→ 列举成功且回读见种子文件。
+        let payload =
+            operations_list_inner(&engine.dispatch, "pv-shell-list:", "").expect("list ok");
+        let parsed: Value = serde_json::from_str(&payload).expect("payload is JSON text");
+        let names: Vec<&str> = parsed["list"]
+            .as_array()
+            .expect("list array")
+            .iter()
+            .filter_map(|entry| entry.get("Name").and_then(Value::as_str))
+            .collect();
+        assert!(names.contains(&"seed.txt"), "names: {names:?}");
+        cleanup_remotes(&engine.dispatch, &["pv-shell-list"]);
+    }
+
+    #[test]
+    fn create_error_surface_carries_no_parameter_values() {
+        let _serial = test_serial_lock().lock().expect("serial lock");
+        let engine = spawn_engine("redact");
+        // 未知 backend → 引擎 500(core create_remote 拒绝载荷值级 redact 兜底):
+        // 壳错误面零密码明文(凭据过壳纪律),非凭据根因(backend 类型)保留。
+        let err = connection_create_protocol_inner(
+            &engine.dispatch,
+            "pv-shell-redact",
+            "no-such-backend",
+            &json!({ "pass": "s3cr3t-pass-value" }),
+        )
+        .expect_err("unknown backend must be rejected");
+        assert!(
+            !err.msg.contains("s3cr3t-pass-value"),
+            "credential leaked into error surface: {}",
+            err.msg
+        );
+        assert!(
+            err.msg.contains("no-such-backend"),
+            "root cause lost: {}",
+            err.msg
+        );
+        // 未建成 remote(500 拒绝路径),零残留可清。
+    }
+
+    #[test]
+    fn non_object_parameters_are_structured_fatal_without_engine_touch() {
+        let err = connection_create_protocol_inner(
+            &FakeNoCallDispatch,
+            "pv-shell-bad",
+            "local",
+            &json!("not-an-object"),
+        )
+        .expect_err("non-object parameters must be rejected");
+        assert_eq!(err.kind, ErrorKind::Internal);
+        assert_eq!(err.severity, Severity::Fatal);
+        assert!(
+            !err.msg.contains("not-an-object"),
+            "raw payload echoed: {}",
+            err.msg
+        );
+    }
+
+    #[test]
+    fn user_home_dir_resolves_env_without_hardcoding() {
+        let home = user_home_dir().expect("home resolvable in test env");
+        let expected = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .expect("home env var present");
+        assert_eq!(home, expected, "must resolve env verbatim, zero hardcoding");
+        assert!(!home.is_empty());
+    }
 }

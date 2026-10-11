@@ -31,6 +31,31 @@ export const commands = {
 	 */
 	connectionCreate123: (name: string, endpoint: string, account: string, appPassword: string) => typedError<null, CmdError>(__TAURI_INVOKE("connection_create_123", { name, endpoint, account, appPassword })),
 	/**
+	 *  协议类通道创建(M1-WP05-T09 DoD①,修复 F1「Create channel not available」):
+	 *  前端表单值以 JSON 文本过线(T01 specta 口径,动态 JSON 一律 String),经
+	 *  ShellDispatch 透传 rc `config/create`(白名单内;core `create_remote` 复用,
+	 *  core 零改动)。成功后立即 `config/get` 回读断言(DoD④「真建 remote→回读」
+	 *  在壳单点收口,向导与集成测试同消费面)。
+	 * 
+	 *  # rc 形状实机锚定(2026-10-11,宿主件 = 引擎钉定 rclone v1.75.1,禁凭记忆)
+	 *  - `config/create` 入参 `{"name","type","parameters","obscure"}`:local 后端
+	 *    `parameters:{}` → 200 `{}`;alias 后端 `parameters:{"remote":"<目标>"}` →
+	 *    200 `{}`;同名重复创建 = 静默覆盖(200);未知 backend → 500(与 T03/T08
+	 *    实测记录一致)。`obscure:true` 显式化(core `create_remote` 已固化)。
+	 *  - `config/get` 入参 `{"name"}` → 回读扁平 remote 配置,恒含 `type` 键
+	 *    (local 实测回 `{"type":"local"}`;alias 回 `{"remote":…,"type":"alias"}`)。
+	 * 
+	 *  # 凭据过壳纪律(R2 口径)
+	 *  parameters 文本可含密码明文:解析失败错误只含 serde 根因零原文回显;core
+	 *  `create_remote` 错误路径已对全部参数值 `redact` 兜底;壳全程零日志,Debug
+	 *  面(`RemoteCreate` 手写)只出键名零值。
+	 * 
+	 *  # Errors
+	 *  parameters 非 JSON 对象 → Internal Fatal(零原文回显);rc 失败 → Core
+	 *  (severity 保真,值已脱敏);回读 `type` 不符 → Core Fatal(结构化,零参数值)。
+	 */
+	connectionCreateProtocol: (remoteName: string, backendType: string, parameters: string) => typedError<null, CmdError>(__TAURI_INVOKE("connection_create_protocol", { remoteName, backendType, parameters })),
+	/**
 	 *  百度 oob 式本地换码(M1-WP05-T08,R2 凭据钉子):code/state + client 凭据
 	 *  全部由前端注入(用户侧自建应用,禁硬编码/禁日志),经 core
 	 *  `BaiduOAuthFlow::exchange_code` 在本机 GET 官方 token 端点换码(code 换
@@ -43,10 +68,22 @@ export const commands = {
 	 */
 	baiduExchangeCode: (clientId: string, clientSecret: string, code: string, oauthState: string) => typedError<null, CmdError>(__TAURI_INVOKE("baidu_exchange_code", { clientId, clientSecret, code, oauthState })),
 	/**
-	 *  浏览数据源:rc 白名单 `operations/list` 单目录列举(fs = "remote:path");
-	 *  载荷 JSON 文本原样透传(壳零字段裁剪、零 schema 发明;理由见 dto.rs)。
+	 *  用户家目录(M1-WP05-T09 DoD③,修复 F3 浏览默认根=/):unix 解析 `HOME`、
+	 *  windows 解析 `USERPROFILE`,零硬编码路径;缺失/空值 = Config Fatal 上浮,
+	 *  禁静默回退(回退 = 把权限问题藏成 UX 缺陷)。前端消费点 = 浏览默认根。
 	 */
-	operationsList: (fs: string) => typedError<string, CmdError>(__TAURI_INVOKE("operations_list", { fs })),
+	userHomeDir: () => typedError<string, CmdError>(__TAURI_INVOKE("user_home_dir")),
+	/**
+	 *  浏览数据源:rc 白名单 `operations/list` 单目录列举(fs = "remote:path";
+	 *  载荷 JSON 文本原样透传(壳零字段裁剪、零 schema 发明;理由见 dto.rs)。
+	 * 
+	 *  # rc 形状实机锚定(2026-10-11,rclone v1.75.1,修复 F2 浏览空白)
+	 *  `operations/list` 要求 `fs` 与 `remote` 两键齐备:仅 `fs` → 400 `Didn't
+	 *  find key "remote" in input`(T01 形状记忆缺口的实锤);`remote:""` 合法
+	 *  (列举 fs 根);裸路径 fs(local 后端)+ `remote:""` → 200,`operations/
+	 *  mkdir` 同形状实测落盘成功。T09 起两键恒齐传。
+	 */
+	operationsList: (fs: string, remote: string) => typedError<string, CmdError>(__TAURI_INVOKE("operations_list", { fs, remote })),
 	/**
 	 *  预算决策查询(core 预算器 acquire,供前端提交前预估等待;cost 取 u32——
 	 *  specta-typescript 禁导 64 位整型,调用点无损加宽至 core 的 u64)。
@@ -135,11 +172,8 @@ export type ErrorKind =
 /**  本地 IO(配置、缓存等读写失败)。 */
 "io" | 
 /**
- *  配置缺失或非法。
- * 
- *  IPC 线格式契约类别:生产代码构造点随首个配置读取命令落地。非测试构建下以
- *  `expect` 声明「尚未构造」——一旦出现构造点会因期望未失效报警,届时删除本属性
- *  (优于 allow 永久压制);测试 target 构造它以钉住线格式值,故属性限定 not(test)。
+ *  配置缺失或非法(首个生产构造点 = `user_home_dir`,M1-WP05-T09 家目录
+ *  解析;HOME/USERPROFILE 缺失 = 环境配置错误,Fatal 上浮)。
  */
 "config" | 
 /**  未归类内部错误(兜底;分类困难时不得用它掩盖可判定类别)。 */
