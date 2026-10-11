@@ -47,6 +47,11 @@ pub enum EngineErrorKind {
     /// 加密 config 无法以注入密钥解密/校验异常(凭据失效或装错密钥,重试
     /// 无意义,Fatal);载荷=诊断文本(零密钥)。(M1-WP04-T01 接缝新增)
     RcdConfigDecryptFailed(String),
+    /// 加密 config 注入要素解析失败(M1-WP99-T03 接缝新增):默认 config 路径
+    /// 解析(`rclone config file`)非零退出/载荷不可解析,或 core 注入决策失败
+    /// (含加密 config 缺主密钥文件的 Fail-closed Fatal);载荷=根因摘要,
+    /// `source()` = 原始错误链(零吞错)。
+    ConfigInjectionUnresolved(String),
     /// 优雅退出未完成(SIGTERM 投递异常/收尾清理失败,Fatal);载荷=失败点描述。
     RcdShutdownFailed(String),
     /// 崩溃重启耗尽指数退避(≤5 次)进入 Failed 终态(Fatal)。
@@ -220,6 +225,9 @@ impl fmt::Display for EngineErrorKind {
             }
             EngineErrorKind::RcdConfigDecryptFailed(detail) => {
                 write!(f, "rcd config decrypt failed: {detail}")
+            }
+            EngineErrorKind::ConfigInjectionUnresolved(detail) => {
+                write!(f, "config injection unresolved: {detail}")
             }
             EngineErrorKind::RcdShutdownFailed(detail) => {
                 write!(f, "rcd shutdown failed: {detail}")

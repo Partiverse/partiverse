@@ -12,14 +12,14 @@
 //! 调用方放 spawn_blocking。
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use partiverse_core::error::Severity;
 
 use crate::client::RcClient;
 use crate::error::{EngineError, EngineErrorKind};
 use crate::installer::EngineInstaller;
-use crate::rcd::{RcdState, RcdSupervisor};
+use crate::rcd::{ConfigInjection, RcdState, RcdSupervisor};
 use crate::slots::EngineSlotConfig;
 
 /// 活动引擎槽位的就绪句柄快照(ensure 返回值;slot_id/pid/socket 构成幂等
@@ -81,7 +81,23 @@ impl EngineCoordinator {
     /// 崩溃则复用 T02 退避重启);同 id 不同配置 = 运行中配置漂移,Fatal;其他
     /// id = 单实例冲突,Fatal。冷路径:cache_dir 物化 → 安装器幂等取二进制 →
     /// supervisor spawn(注入 `--cache-dir`)→ 就绪探活 → Ready。
+    /// 等价 [`Self::ensure_with_config`] 传「恒无注入」解析器(M1-WP02 语义
+    /// 原样保留;M1-WP99-T03 起加密 config 面走显式接缝)。
     pub fn ensure(&mut self, slot: &EngineSlotConfig) -> Result<EngineHandle, EngineError> {
+        self.ensure_with_config(slot, |_| Ok(None))
+    }
+
+    /// [`Self::ensure`] 的加密 config 注入形态(M1-WP99-T03 接缝):冷路径在
+    /// 安装器取回二进制后调用 `config`(注入解析器;入参 = rclone 二进制路径,
+    /// 返回 `None` = 无注入原样启动),产物交 [`RcdSupervisor::spawn_with_config`]
+    /// ——解析器失败即整体失败上浮(零静默降级);崩溃重启按监督器内保存的
+    /// 要素重注入(rcd.rs 既有契约)。幂等路径(已 Ready)不重调解析器(要素
+    /// 随监督器存续;单次会话进程内配置不漂移)。
+    pub fn ensure_with_config(
+        &mut self,
+        slot: &EngineSlotConfig,
+        config: impl FnOnce(&Path) -> Result<Option<ConfigInjection>, EngineError>,
+    ) -> Result<EngineHandle, EngineError> {
         // 手工构造的槽位与解析路径同一强度守卫(非法配置在触引擎前即拦截)。
         slot.validate()?;
         if let Some(active) = self.active.as_mut() {
@@ -108,12 +124,18 @@ impl EngineCoordinator {
             ));
         }
         // 槽位资源面:cache-dir 先物化(IO 失败按 classify_io 分级上浮),
-        // 再交安装器(T01 幂等)与 supervisor(T02 探活至 Ready)。
+        // 再交安装器(T01 幂等)与 supervisor(T02 探活至 Ready);注入要素
+        // 在二进制就绪后解析(M1-WP99-T03:解析器可复用二进制询问 rclone)。
         fs::create_dir_all(&slot.cache_dir).map_err(EngineError::from_io)?;
         let binary = self.installer.ensure(&slot.engine_root)?;
+        let injection = config(&binary)?;
         let active = ActiveSlot {
             slot: slot.clone(),
-            supervisor: RcdSupervisor::spawn(&binary, &slot.cache_dir)?,
+            supervisor: RcdSupervisor::spawn_with_config(
+                &binary,
+                &slot.cache_dir,
+                injection.as_ref(),
+            )?,
         };
         let handle = active.handle();
         self.active = Some(active);
