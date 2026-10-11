@@ -5,6 +5,12 @@
 //! 按次启动形态(任务卡显式声明):每个引擎类子命令在一次调用内
 //! `ensure → 执行 → shutdown on exit`;RcdLaunch Drop 兜底 kill——
 //! CLI 退出 = 引擎退出 = 运行中 job 终止。
+//!
+//! 运行日志(M1-WP99-T02):main 入口唯一包裹 run()——起始/结束行 + 错误链
+//! 落盘 `~/.local/state/partiverse/logs/pv.log`(argv 脱敏;失败静默降级),
+//! 子命令零感知(见 runlog 模块文档)。
+
+mod runlog;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -48,15 +54,26 @@ notes:
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // —— 运行日志接线(M1-WP99-T02):main 入口唯一包裹,子命令零感知 ——
+    // 起始行先行(argv 即刻脱敏落盘,任何失败路径都有起点可查);记录器打开
+    // 失败 = 空记录器静默降级,主功能零阻塞(取舍见 runlog 模块文档)。
+    let mut run_log = runlog::RunLog::open();
+    run_log.log_start(&args);
+    let started = std::time::Instant::now();
     match run(&args) {
         Ok(output) => {
+            run_log.log_end(0, started.elapsed(), &output);
             if !output.is_empty() {
                 println!("{output}");
             }
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("error: {}", error_chain(&*err));
+            let chain = error_chain(&*err).to_string();
+            // 错误记录:error_chain 全文逐行入日志(卡内 ②),stderr 照常。
+            run_log.log_error_chain(&chain);
+            run_log.log_end(1, started.elapsed(), &chain);
+            eprintln!("error: {chain}");
             ExitCode::FAILURE
         }
     }
