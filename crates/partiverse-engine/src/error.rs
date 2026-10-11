@@ -292,14 +292,139 @@ impl std::error::Error for EngineError {
 }
 
 /// 拼接错误根因链(顶层 Display + `source()` 逐级;诊断输出零吞错)。
+///
+/// 相邻重复段折叠(M1-WP07-T05 D2,dogfood 实录):顶层 Display 常已内嵌
+/// 完整根因文本(如 `retryable: engine installer (retryable): rc server
+/// error (...): X`),`source()` 逐级再拼会把同一段文本重复一遍。折叠语义
+/// = **相同文本段只保留一次**:待拼段文本若已作为完整形态出现在已拼文本
+/// 尾部,则跳过(首段 Severity 前缀原样保留);仅折叠 Display 拼接面,
+/// 错误结构化面(kind/severity 载荷)零改动。
 /// bin 目标是独立 crate,故必须 pub 而非 pub(crate)。
 pub fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
     let mut text = err.to_string();
     let mut current = err.source();
     while let Some(cause) = current {
-        text.push_str(": ");
-        text.push_str(&cause.to_string());
+        let cause_text = cause.to_string();
+        if !text.ends_with(&cause_text) {
+            text.push_str(": ");
+            text.push_str(&cause_text);
+        }
         current = cause.source();
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 链式测试替身(仅测试,无生产形态):固定 Display 文本 + 可选 source。
+    #[derive(Debug)]
+    struct ChainError {
+        text: String,
+        source: Option<Box<dyn std::error::Error + 'static>>,
+    }
+
+    impl ChainError {
+        /// 叶子错误(无 source)。
+        fn leaf(text: &str) -> Box<Self> {
+            Box::new(ChainError {
+                text: text.to_owned(),
+                source: None,
+            })
+        }
+
+        /// 带单级 source 的错误。
+        fn with_source(text: &str, source: Box<dyn std::error::Error + 'static>) -> Box<Self> {
+            Box::new(ChainError {
+                text: text.to_owned(),
+                source: Some(source),
+            })
+        }
+    }
+
+    impl fmt::Display for ChainError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(&self.text)
+        }
+    }
+
+    impl std::error::Error for ChainError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.source.as_ref().map(|b| &**b as _)
+        }
+    }
+
+    /// 折叠契约(卡内 ① 单段不变):无 source 的单段错误,Display 原样返回。
+    #[test]
+    fn error_chain_single_segment_unchanged() {
+        let leaf = ChainError::leaf("readdirent /tmp/x: not a directory");
+        assert_eq!(error_chain(&*leaf), "readdirent /tmp/x: not a directory");
+    }
+
+    /// 折叠契约(卡内 ① 无重复不变):链上各段文本互不重复 → 逐段拼接
+    /// 语义与既有行为逐字节一致(零回归)。
+    #[test]
+    fn error_chain_without_duplicates_unchanged() {
+        let chain = ChainError::with_source(
+            "engine installer (fatal): extract failed",
+            ChainError::with_source(
+                "zip entry missing: rcd",
+                ChainError::leaf("unexpected end of archive"),
+            ),
+        );
+        assert_eq!(
+            error_chain(&*chain),
+            "engine installer (fatal): extract failed: \
+             zip entry missing: rcd: unexpected end of archive"
+        );
+    }
+
+    /// 折叠契约(卡内 ① 重复段折叠):D2 dogfood 现场同形——顶层 Display
+    /// 已内嵌完整根因链文本,`source()` 逐级重复出现同段 → 折叠为一次,
+    /// 首段 Severity 前缀(`retryable: `)保留。
+    #[test]
+    fn error_chain_folds_embedded_duplicate_chain() {
+        let chain = ChainError::with_source(
+            "retryable: engine installer (retryable): rc server error \
+             (operations/list, http 500): error in ListJSON: \
+             failed to read directory entry: readdirent /tmp/x: not a directory",
+            ChainError::with_source(
+                "engine installer (retryable): rc server error \
+                 (operations/list, http 500): error in ListJSON: \
+                 failed to read directory entry: readdirent /tmp/x: not a directory",
+                ChainError::leaf("readdirent /tmp/x: not a directory"),
+            ),
+        );
+        assert_eq!(
+            error_chain(&*chain),
+            "retryable: engine installer (retryable): rc server error \
+             (operations/list, http 500): error in ListJSON: \
+             failed to read directory entry: readdirent /tmp/x: not a directory"
+        );
+    }
+
+    /// 折叠契约(卡内 ① 重复段折叠):相邻段文本完全相同 → 只保留一次。
+    #[test]
+    fn error_chain_folds_adjacent_equal_segments() {
+        let chain = ChainError::with_source(
+            "engine slot missing",
+            ChainError::leaf("engine slot missing"),
+        );
+        assert_eq!(error_chain(&*chain), "engine slot missing");
+    }
+
+    /// 折叠契约(边界):仅后缀部分重叠(非完整段形态)不折叠——待拼段是
+    /// 独立根因,信息不得吞掉(零吞错红线)。
+    #[test]
+    fn error_chain_keeps_suffix_overlapping_but_distinct_segment() {
+        let chain = ChainError::with_source(
+            "failed to read directory entry: not a directory",
+            ChainError::leaf("directory entry closed"),
+        );
+        assert_eq!(
+            error_chain(&*chain),
+            "failed to read directory entry: not a directory: directory entry closed"
+        );
+    }
 }
