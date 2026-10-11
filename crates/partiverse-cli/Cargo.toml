@@ -1,0 +1,17 @@
+# Partiverse 命令行界面(M1-WP07-T01:CLI 先行,Owner 2026-10-11 定向;
+# 手写子命令解析,partisync-cli 形态先例——零 clap/tokio,零新增第三方依赖)。
+[package]
+name = "partiverse-cli"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0"
+# 应用内部 crate,不发布到 registry(deny.toml [licenses] private 豁免依赖此标记)。
+publish = false
+
+[dependencies]
+# 向下依赖(架构分层:CLI=应用层薄壳,全部透传 crates,零业务逻辑);显式
+# version 避免 deny wildcards=deny 误伤(ADR-0004 同款)。
+partiverse-core = { path = "../partiverse-core", version = "0.1.0" }
+partiverse-engine = { path = "../partiverse-engine", version = "0.1.0" }
+# rc 载荷参数面(树内既有版本单源,零新增包/零新增版本;core/engine 同版)。
+serde_json = "1.0.151"
