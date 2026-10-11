@@ -17,10 +17,7 @@ pub(crate) fn split_target(target: &str) -> (String, String) {
     match target.split_once(':') {
         // 真机实锚(T05 验证):path 前导 `/` 会导致 rclone operations/list
         // 静默返回空列表(stat 宽容但 list 不宽容)——统一剥除。
-        Some((name, path)) => (
-            format!("{name}:"),
-            path.trim_start_matches('/').to_owned(),
-        ),
+        Some((name, path)) => (format!("{name}:"), path.trim_start_matches('/').to_owned()),
         None => (target.to_owned(), String::new()),
     }
 }
