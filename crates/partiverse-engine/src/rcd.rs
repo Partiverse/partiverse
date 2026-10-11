@@ -37,14 +37,79 @@ const CONFIG_ENV: &str = "RCLONE_CONFIG";
 const PASSWORD_COMMAND_ENV: &str = "RCLONE_PASSWORD_COMMAND";
 
 /// 加密 config 注入要素(M1-WP04-T01 接缝):rcd 以加密 config + 取密命令
-/// 启动。契约:`password_command` 为取密命令(生产=config/ 平台脚本,内容
-/// 从 keychain 取主密钥),**禁止内嵌密钥本体**(密钥零 argv/零落盘/零日志)。
+/// 启动。契约:`password_command` 为取密命令(生产=M1-WP99-T03 起 `cat "<主密钥
+/// 文件>"`,T01 config/ 平台脚本面保留),**禁止内嵌密钥本体**(密钥零 argv/
+/// 零落盘/零日志)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigInjection {
     /// 加密 config 文件路径(→ `RCLONE_CONFIG`)。
     pub config_path: PathBuf,
     /// 取密命令(→ `RCLONE_PASSWORD_COMMAND`,rclone 经其输出取得 config 密码)。
     pub password_command: String,
+}
+
+/// 解析 rclone 默认 config 文件路径(M1-WP99-T03 接缝):`rclone config file`
+/// 官方接口,零硬编码路径(红线)。1.75.1 实机锚定(2026-10-11):输出恒两行,
+/// 末行 = 绝对路径(存在 = "Configuration file is stored at:",缺失 =
+/// "Configuration file doesn't exist, but rclone will use this path:",两形同
+/// 构);`RCLONE_CONFIG`/`XDG_CONFIG_HOME`/`HOME` env 覆盖被如实尊重(实机
+/// 实测),故解析结果与 rclone 自身启动取用面一致。解析规则 = 末个非空行;
+/// 非零退出/载荷不可解析/非绝对路径 → 结构化 Fatal(零猜测、零硬编码回退)。
+///
+/// # Errors
+/// spawn 失败(二进制缺失/不可执行)/进程非零/输出不可解析 →
+/// `ConfigInjectionUnresolved`(Fatal;spawn 面与 rcd `RcdStartFailed` 同款
+/// 先例——确定性失败标 Retryable 只会产出无意义重试)。
+pub fn resolve_default_config_path(binary: &Path) -> Result<PathBuf, EngineError> {
+    let output = Command::new(binary)
+        .arg("config")
+        .arg("file")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|err| {
+            EngineError::new(
+                EngineErrorKind::ConfigInjectionUnresolved(format!(
+                    "rclone config file spawn failed: {err}"
+                )),
+                Severity::Fatal,
+            )
+            .with_source(Box::new(err))
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail =
+            first_line(&stderr).unwrap_or_else(|| format!("exit status {}", output.status));
+        return Err(EngineError::new(
+            EngineErrorKind::ConfigInjectionUnresolved(format!(
+                "rclone config file failed: {detail}"
+            )),
+            Severity::Fatal,
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let path_line = stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .ok_or_else(|| {
+            EngineError::new(
+                EngineErrorKind::ConfigInjectionUnresolved(
+                    "rclone config file produced no path line".into(),
+                ),
+                Severity::Fatal,
+            )
+        })?;
+    let path = PathBuf::from(path_line);
+    if !path.is_absolute() {
+        return Err(EngineError::new(
+            EngineErrorKind::ConfigInjectionUnresolved(format!(
+                "rclone config file path is not absolute: {path_line}"
+            )),
+            Severity::Fatal,
+        ));
+    }
+    Ok(path)
 }
 
 /// 就绪探活总窗口(本机实测 rclone 冷启动 <1s;CI 留足余量)。

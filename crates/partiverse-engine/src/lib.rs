@@ -20,5 +20,5 @@ pub use coordinator::{EngineCoordinator, EngineHandle};
 pub use error::{EngineError, EngineErrorKind};
 pub use installer::EngineInstaller;
 pub use manifest::EngineManifest;
-pub use rcd::{RcdState, RcdSupervisor};
+pub use rcd::{ConfigInjection, RcdState, RcdSupervisor, resolve_default_config_path};
 pub use slots::{DEFAULT_SLOT_ID, EngineSlotConfig};
