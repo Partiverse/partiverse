@@ -82,9 +82,10 @@ fn create_local_create_webdav_ls_and_list_readback_on_real_engine() {
     // create-local:alias 后端包本地路径(卡内 ②;零硬编码,路径=沙箱工作区)。
     connection::create_local(dispatch, &local_name, &work.to_string_lossy())
         .expect("create-local ok");
-    // create-webdav:123 形态(伪 .invalid 端点,config 只存不连,零真实网络)。
-    connection::create_webdav(dispatch, &webdav_name, ENDPOINT, "13800000000", APP_PASS)
-        .expect("create-webdav ok");
+    // create-123:123 形态(伪 .invalid https 端点过 123 校验,config 只存不连,
+    // 零真实网络;T04 拆分后 123 专属校验面归 create-123)。
+    connection::create_123(dispatch, &webdav_name, ENDPOINT, "13800000000", APP_PASS)
+        .expect("create-123 ok");
 
     // ls 全链:operations/list(fs+remote 两键齐传)列沙箱工作区,T03 渲染面:
     // 表格输出(表头+条目行,非裸 JSON 起始),fixture 命中。
@@ -265,6 +266,199 @@ fn mkdir_copy_wait_watch_exhausted_retry_full_chain_on_real_engine() {
     // 清场:config/delete 零残留 + 优雅退出。
     connection::delete(dispatch, &src_name).expect("delete src ok");
     connection::delete(dispatch, &dst_name).expect("delete dst ok");
+    session.shutdown().expect("graceful shutdown");
+    let _ = fs::remove_dir_all(&work);
+}
+
+// —— M1-WP07-T04 DoD④:真引擎离线全链(通用 webdav http 回环 serve 建连 →
+// config/get 回读 → ls 可达;123 校验 http 端点拒绝上浮)——
+
+use std::net::{TcpListener, TcpStream};
+use std::process::{Child, Command, Stdio};
+
+use serde_json::Value;
+
+use partiverse_core::error::Severity;
+use partiverse_core::jobs::RcDispatch;
+use partiverse_core::pan123::{Pan123ErrorKind, kind_of};
+
+/// rclone serve webdav 子进程守卫(Drop 兜底 kill+wait,测试失败零残留进程)。
+struct ServeGuard(Child);
+
+impl Drop for ServeGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// 占用一个空闲回环端口(绑定后立即释放;极小 TOCTOU 窗口属测试沙箱面,
+/// 端口被占 = serve 起不来/连不上,显式失败零静默)。
+fn free_loopback_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral loopback port");
+    listener.local_addr().expect("local addr").port()
+}
+
+/// 等待 serve 端口可连(上限 ~10s;超时显式失败,零静默)。
+fn wait_serve_port(port: u16) {
+    for _ in 0..100 {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("rclone serve webdav did not open 127.0.0.1:{port} within 10s");
+}
+
+#[test]
+fn generic_webdav_http_serve_create_readback_ls_full_chain_on_real_engine() {
+    let _serial = test_serial_lock().lock().expect("serial lock");
+    require_preinstalled_engine();
+    let (slot, work) = test_slot("t04");
+    let serve_dir = work.join("serve");
+    fs::create_dir_all(&serve_dir).expect("create serve dir");
+    fs::write(serve_dir.join("t04.txt"), b"partiverse cli t04 webdav")
+        .expect("write serve fixture file");
+
+    // 本地回环 serve webdav(卡内 DoD④:http 端点合法;零真实网络)。
+    const SERVE_USER: &str = "pv-t04-user";
+    const SERVE_PASS: &str = "pv-t04-serve-pass";
+    let port = free_loopback_port();
+    let serve_child = Command::new(require_preinstalled_engine())
+        .args([
+            "serve",
+            "webdav",
+            serve_dir.to_string_lossy().as_ref(),
+            "--addr",
+            &format!("127.0.0.1:{port}"),
+            "--user",
+            SERVE_USER,
+            "--pass",
+            SERVE_PASS,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn rclone serve webdav");
+    let _serve = ServeGuard(serve_child);
+    wait_serve_port(port);
+
+    let name = format!("pv-cli-webdav-generic-{}", std::process::id());
+    let mut session = Session::open_with_slot(&slot).expect("session opens (ensure ready)");
+    let dispatch = session.dispatch();
+
+    // ① 通用 webdav 建连(http 回环端点直注,零 123 校验)。
+    connection::create_webdav(
+        dispatch,
+        &name,
+        &format!("http://127.0.0.1:{port}"),
+        SERVE_USER,
+        SERVE_PASS,
+    )
+    .expect("generic webdav create ok");
+
+    // ② config/get 回读:type/url/user 在册;pass 为 obscure 密文(≠明文)。
+    let readback = dispatch
+        .call("config/get", &serde_json::json!({ "name": name }))
+        .expect("config/get ok");
+    assert_eq!(
+        readback.get("type").and_then(Value::as_str),
+        Some("webdav"),
+        "type readback: {readback:?}"
+    );
+    assert_eq!(
+        readback.get("url").and_then(Value::as_str),
+        Some(format!("http://127.0.0.1:{port}").as_str()),
+        "url readback: {readback:?}"
+    );
+    assert_eq!(
+        readback.get("user").and_then(Value::as_str),
+        Some(SERVE_USER),
+        "user readback: {readback:?}"
+    );
+    let stored_pass = readback.get("pass").and_then(Value::as_str);
+    assert_ne!(
+        stored_pass,
+        Some(SERVE_PASS),
+        "stored pass must be obscured, never plaintext"
+    );
+
+    // ③ ls 全链:operations/list 经引擎 webdav 后端打到回环 serve,fixture 命中。
+    let listing = browse::ls(dispatch, &format!("{name}:")).expect("ls over webdav ok");
+    assert!(
+        listing
+            .lines()
+            .next()
+            .is_some_and(|header| header.starts_with("NAME")),
+        "ls output must carry the table header: {listing}"
+    );
+    assert!(
+        listing.lines().any(|line| line.contains("t04.txt")),
+        "serve fixture file must be listed over webdav: {listing}"
+    );
+
+    // ④ connection list:连接在册;零参数值输出(凭据红线)。
+    let connections = connection::list(dispatch).expect("connection list ok");
+    assert!(
+        connections
+            .lines()
+            .any(|line| line == format!("{name}\twebdav")),
+        "generic webdav connection listed: {connections}"
+    );
+    assert!(
+        !connections.contains(SERVE_PASS) && !connections.contains(SERVE_USER),
+        "connection list output must never carry parameter values"
+    );
+
+    // 清场:config/delete 零残留 + 优雅退出;serve 由 Drop 守卫回收。
+    connection::delete(dispatch, &name).expect("delete webdav ok");
+    session.shutdown().expect("graceful shutdown");
+    let _ = fs::remove_dir_all(&work);
+}
+
+#[test]
+fn create_123_rejects_http_endpoint_with_invalid_123pan_error_on_real_engine() {
+    let _serial = test_serial_lock().lock().expect("serial lock");
+    require_preinstalled_engine();
+    let (slot, work) = test_slot("t04-reject");
+
+    let name = format!("pv-cli-123-reject-{}", std::process::id());
+    const HTTP_ENDPOINT: &str = "http://127.0.0.1:9";
+    const ACCOUNT: &str = "13800000000";
+    const PASS: &str = "t04-reject-pass";
+
+    let mut session = Session::open_with_slot(&slot).expect("session opens (ensure ready)");
+    let dispatch = session.dispatch();
+
+    // 123 校验原样迁移不放宽:http 端点 → invalid 123pan 前置拒绝上浮。
+    let err = connection::create_123(dispatch, &name, HTTP_ENDPOINT, ACCOUNT, PASS)
+        .expect_err("http endpoint must be rejected by 123 validation");
+    assert_eq!(err.severity, Severity::Fatal, "rejection severity: {err:?}");
+    assert!(
+        matches!(kind_of(&err), Some(Pan123ErrorKind::Invalid(_))),
+        "structured invalid kind: {err:?}"
+    );
+    let text = err.to_string();
+    assert!(
+        text.contains("invalid 123pan webdav input"),
+        "invalid 123pan text must surface: {text}"
+    );
+    // 载荷零凭据(错误面脱敏红线)。
+    assert!(
+        !text.contains(PASS) && !text.contains(ACCOUNT) && !text.contains(HTTP_ENDPOINT),
+        "rejection text must be credential-free: {text}"
+    );
+
+    // 校验前置拒绝 = config 零残留(config/get 回读空对象,T01 删除语义锚)。
+    let readback = dispatch
+        .call("config/get", &serde_json::json!({ "name": name }))
+        .expect("config/get ok");
+    assert_eq!(
+        readback,
+        Value::Object(serde_json::Map::new()),
+        "rejected create must leave no config residue: {readback:?}"
+    );
+
     session.shutdown().expect("graceful shutdown");
     let _ = fs::remove_dir_all(&work);
 }
