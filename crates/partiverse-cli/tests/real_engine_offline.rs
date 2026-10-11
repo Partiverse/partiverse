@@ -126,3 +126,140 @@ fn create_local_create_webdav_ls_and_list_readback_on_real_engine() {
     session.shutdown().expect("graceful shutdown");
     let _ = fs::remove_dir_all(&work);
 }
+
+// —— M1-WP07-T02 DoD⑤:真引擎离线全链(mkdir→copy --wait→jobs list --watch
+// + 预算 Exhausted 停放→retry 复活;同库单源 = 卡内 ④)——
+
+use partiverse_cli::fsops;
+use partiverse_cli::jobs as cli_jobs;
+use partiverse_core::budget::{BudgetScheduler, QuotaProfiles};
+use partiverse_core::fsops::poll_with_progress;
+use partiverse_core::jobs::{JobManager, JobStatus};
+
+/// 预算档(src node cap=2;fixture 数值非 provider 事实):copy cost=1 →
+/// Allow;copy cost=3 → 结构性 Exhausted;retry cost=1 → Allow 复活。经公共
+/// `load_with_override` 装载(core `parse` 为 crate 内面)。
+fn t02_profiles(work: &std::path::Path, src_name: &str) -> QuotaProfiles {
+    let json = format!(
+        r#"{{"version":1,"profiles":{{"{src_name}":{{"requests_per_window":2,"window_secs":1000,"source":"test fixture"}}}},"bwlimit":{{"rate":"off"}},"backoff_secs":60}}"#
+    );
+    let path = work.join("quota-profiles.json");
+    fs::write(&path, json).expect("write quota profiles fixture");
+    QuotaProfiles::load_with_override(&path).expect("fixture parses")
+}
+
+/// 轮询至终态(200ms 间隔,测试侧执行;core 零 sleep)。
+fn poll_until_terminal(
+    manager: &JobManager,
+    dispatch: &impl partiverse_core::jobs::RcDispatch,
+    id: &str,
+) -> partiverse_core::jobs::JobRecord {
+    loop {
+        let (record, _) = poll_with_progress(manager, dispatch, id).expect("poll with progress");
+        if matches!(record.status, JobStatus::Done | JobStatus::Error) {
+            return record;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+#[test]
+fn mkdir_copy_wait_watch_exhausted_retry_full_chain_on_real_engine() {
+    let _serial = test_serial_lock().lock().expect("serial lock");
+    require_preinstalled_engine();
+    let (slot, work) = test_slot("t02");
+    let (src_dir, dst_dir) = (work.join("src"), work.join("dst"));
+    fs::create_dir_all(&src_dir).expect("create src dir");
+    fs::create_dir_all(&dst_dir).expect("create dst dir");
+    const FIXTURE: &[u8] = b"partiverse cli t02 transfer";
+    fs::write(src_dir.join("t02.txt"), FIXTURE).expect("write fixture file");
+    let src_name = format!("pv-t02-src-{}", std::process::id());
+    let dst_name = format!("pv-t02-dst-{}", std::process::id());
+
+    let mut session = Session::open_with_slot(&slot).expect("session opens (ensure ready)");
+    let dispatch = session.dispatch();
+    connection::create_local(dispatch, &src_name, &src_dir.to_string_lossy())
+        .expect("create-local src ok");
+    connection::create_local(dispatch, &dst_name, &dst_dir.to_string_lossy())
+        .expect("create-local dst ok");
+
+    // 同库单源(卡内 ④:jobs+budget 同一 db 文件;生产 = open_default 同语义)。
+    let db = work.join("partiverse.db");
+    let manager = JobManager::open_at(&db).expect("job manager opens");
+    let budget =
+        BudgetScheduler::open_at(&db, t02_profiles(&work, &src_name)).expect("budget opens");
+
+    // ① mkdir(无 profile → Allow):目录真实落盘。
+    let out =
+        fsops::mkdir(&budget, dispatch, &format!("{dst_name}:incoming"), 1).expect("mkdir ok");
+    assert!(out.contains("directory created"), "{out}");
+    assert!(
+        dst_dir.join("incoming").is_dir(),
+        "engine mkdir must land on disk"
+    );
+
+    // ② copy --wait(gated_submit 全链)→ 回执 + 轮询至 done + 落盘。
+    let out = fsops::transfer(
+        &manager,
+        &budget,
+        dispatch,
+        false,
+        &format!("{src_name}:"),
+        &format!("{dst_name}:"),
+        None,
+        1,
+        true,
+    )
+    .expect("copy --wait ok");
+    assert!(
+        out.contains("job submitted") && out.contains("job done"),
+        "{out}"
+    );
+    assert_eq!(
+        fs::read(dst_dir.join("t02.txt")).expect("copied file readable"),
+        FIXTURE,
+        "tree copy must land the fixture"
+    );
+
+    // ③ jobs list --watch:全链终态安定 → 快照一次即返回,done 入镜。
+    let out = cli_jobs::list(&manager, None, true).expect("jobs list --watch ok");
+    assert!(out.contains("done"), "{out}");
+
+    // ④ 预算 Exhausted 停放(cost=3 > 桶容 2):queued 无锚,引擎零触达。
+    let out = fsops::transfer(
+        &manager,
+        &budget,
+        dispatch,
+        false,
+        &format!("{src_name}:"),
+        &format!("{dst_name}:"),
+        None,
+        3,
+        false,
+    )
+    .expect("exhausted copy reports parked");
+    assert!(out.contains("budget exhausted"), "{out}");
+    let queued = manager
+        .list_jobs(Some(JobStatus::Queued))
+        .expect("list queued");
+    assert_eq!(queued.len(), 1, "恰一枚停放行: {queued:?}");
+    assert!(queued[0].engine_job_id.is_none(), "停放行零引擎锚");
+    let parked_id = queued[0].id.clone();
+
+    // ⑤ retry 复活(壳决策树 core 单源)→ 轮询至 done,内容再次落盘。
+    let out = cli_jobs::retry(&manager, &budget, dispatch, &parked_id, None, 1, None, None)
+        .expect("jobs retry ok");
+    assert!(out.contains("revived"), "{out}");
+    let record = poll_until_terminal(&manager, dispatch, &parked_id);
+    assert_eq!(record.status, JobStatus::Done, "revived job: {record:?}");
+    assert_eq!(
+        fs::read(dst_dir.join("t02.txt")).expect("revived copy readable"),
+        FIXTURE
+    );
+
+    // 清场:config/delete 零残留 + 优雅退出。
+    connection::delete(dispatch, &src_name).expect("delete src ok");
+    connection::delete(dispatch, &dst_name).expect("delete dst ok");
+    session.shutdown().expect("graceful shutdown");
+    let _ = fs::remove_dir_all(&work);
+}

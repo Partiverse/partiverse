@@ -29,6 +29,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 
+use crate::budget::{BudgetScheduler, Decision, GatedSubmit, JobSpec};
 use crate::error::{PartisyError, Severity, classify_io};
 
 /// submit 允许集(T01 白名单子集;卡内边界:限 sync/copy|move 等 async 支持命令)。
@@ -310,6 +311,20 @@ ALTER TABLE jobs ADD COLUMN progress_total INTEGER;
 ALTER TABLE jobs ADD COLUMN checksum TEXT;
 ALTER TABLE jobs ADD COLUMN retries INTEGER NOT NULL DEFAULT 0",
 ];
+
+/// 重试结果([`JobManager::retry`] 返回面,壳 commands.rs `JobRetryOut` 的 core
+/// 对应物,M1-WP07-T02 纯提取):预算三态保真,零吞错。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobRetryOutcome {
+    /// 停放行(queued 无锚)已原地复活(同 id,锚回填,失败标注清空)。
+    Revived(JobRecord),
+    /// error 终态行已按预算门提交新 job(旧行留痕零覆盖)。
+    Submitted(JobRecord),
+    /// 预算限流(零引擎触达;wait_until_ms = 可重试时刻;停放路径零落行零改动)。
+    Throttled { wait_until_ms: u64 },
+    /// 预算结构性拒绝:停放路径 = 原行原样;error 路径 = 新登记 queued 行。
+    Exhausted(JobRecord),
+}
 
 /// JobManager:状态机+落库+对账(单连接+Mutex:Connection 非 Sync,卡内边界);
 /// 重试策略默认 [`RetryPolicy::default`](`with_retry_policy` 可配)。
@@ -725,6 +740,55 @@ impl JobManager {
             }
         }
         Ok(reconciled)
+    }
+
+    /// 重试(壳 commands.rs job_retry 决策树纯提取,M1-WP07-T02 卡内授权:壳/CLI
+    /// 单一事实源):停放行(queued 无锚)→ 预算 re-acquire 前置,Allow 即
+    /// [`JobManager::revive_parked`] 原地复活(同 id,锚回填,失败标注清空);
+    /// error 终态行 → 预算门提交**新** job(旧行留痕零覆盖);其余状态(running/
+    /// done/带锚 queued)拒绝 Fatal,零出边。method/params 不落库(红线 3),由
+    /// 调用方照首次提交原样供给(`spec`;kind/src/dst 仅供新 job 元数据)。
+    ///
+    /// # Errors
+    /// 预算决策面/状态机守卫/severity 保真的引擎失败均结构化上浮(壳原语义零改动)。
+    pub fn retry(
+        &self,
+        dispatch: &impl RcDispatch,
+        budget: &BudgetScheduler,
+        id: &str,
+        node: &str,
+        cost: u64,
+        spec: JobSpec<'_>,
+    ) -> Result<JobRetryOutcome, PartisyError> {
+        let record = self.get(id)?;
+        match record.status {
+            JobStatus::Queued if record.engine_job_id.is_none() => {
+                match budget.acquire(node, cost)? {
+                    Decision::Allow => Ok(JobRetryOutcome::Revived(self.revive_parked(
+                        dispatch,
+                        id,
+                        spec.method,
+                        spec.params,
+                    )?)),
+                    Decision::Throttled { wait_until_ms } => {
+                        Ok(JobRetryOutcome::Throttled { wait_until_ms })
+                    }
+                    Decision::Exhausted => Ok(JobRetryOutcome::Exhausted(self.get(id)?)),
+                }
+            }
+            JobStatus::Error => match budget.gated_submit(self, dispatch, node, cost, spec)? {
+                GatedSubmit::Submitted(record) => Ok(JobRetryOutcome::Submitted(record)),
+                GatedSubmit::Throttled { wait_until_ms } => {
+                    Ok(JobRetryOutcome::Throttled { wait_until_ms })
+                }
+                GatedSubmit::Exhausted(record) => Ok(JobRetryOutcome::Exhausted(record)),
+            },
+            other => Err(JobErrorKind::Invalid(format!(
+                "job `{id}` is not retryable in status `{}`",
+                other.as_str()
+            ))
+            .fatal()),
+        }
     }
 
     /// 按 job id 取记录(不存在 → Fatal UnknownJob)。
@@ -1816,5 +1880,153 @@ mod tests {
             .mark_verify_failed(&job2.id, "size mismatch: src=100 dst=90", Sev::Retryable)
             .expect("land");
         assert_eq!(landed.severity, Some(Sev::Retryable));
+    }
+
+    // —— M1-WP07-T02:retry 下沉(壳 commands.rs job_retry 决策树纯提取)——
+
+    /// retry 档(cap=1,窗口=1000s;fixture 数值非 provider 事实):cost=1 覆盖
+    /// Allow/Throttled 二态,cost=2 恒 Exhausted(结构性,cost 超桶容)。
+    const RETRY_PROFILES: &str = r#"{"version":1,"profiles":{"testprov":{"requests_per_window":1,"window_secs":1000,"source":"test fixture"}},"bwlimit":{"rate":"off"},"backoff_secs":60}"#;
+
+    /// 同库夹具(jobs+budget 同一文件,联迁单源;返回路径供清理)。
+    fn retry_fixture(tag: &str) -> (JobManager, BudgetScheduler, PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "partiverse-jobs-retry-{tag}-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let manager = JobManager::open_at(&path).expect("jobs store");
+        let budget = BudgetScheduler::open_at(
+            &path,
+            crate::budget::QuotaProfiles::parse(RETRY_PROFILES).expect("fixture parses"),
+        )
+        .expect("budget");
+        (manager, budget, path)
+    }
+
+    #[test]
+    fn retry_decision_tree_matches_shell_extraction() {
+        // 壳决策树逐分支对齐:停放行(queued 无锚)Allow → 原地复活(同 id 锚
+        // 回填)/Throttled/Exhausted 零触达原行原样;error 终态行 Allow → 预算门
+        // 提交新 job(旧行留痕)/Exhausted → 新 queued 行;running 行拒绝 Fatal。
+        fn spec<'a>(method: &'a str, params: &'a Value) -> JobSpec<'a> {
+            JobSpec {
+                method,
+                kind: "copy",
+                src: "a:",
+                dst: "b:",
+                params,
+            }
+        }
+        let (mgr, budget, path) = retry_fixture("tree");
+        let params = serde_json::json!({ "srcFs": "a:", "dstFs": "b:" });
+        let probe = FakeScriptDispatch::scripted(&[serde_json::json!({ "jobid": 71 })]);
+        let parked = mgr.register_queued("copy", "a:", "b:").expect("parked");
+        let JobRetryOutcome::Revived(revived) = mgr
+            .retry(
+                &probe,
+                &budget,
+                &parked.id,
+                "testprov",
+                1,
+                spec("sync/copy", &params),
+            )
+            .expect("retry parked")
+        else {
+            panic!("expected Revived")
+        };
+        assert_eq!(
+            (revived.id, revived.engine_job_id),
+            (parked.id.clone(), Some(71))
+        );
+        // Throttled(桶 1/1 已用尽)与 Exhausted(cost 2 > 桶容 1):零触达、原行原样。
+        let parked2 = mgr.register_queued("copy", "c:", "d:").expect("parked2");
+        assert!(
+            matches!(
+                mgr.retry(
+                    &probe,
+                    &budget,
+                    &parked2.id,
+                    "testprov",
+                    1,
+                    spec("sync/copy", &params)
+                )
+                .expect("throttled"),
+                JobRetryOutcome::Throttled { .. }
+            ),
+            "桶尽须 Throttled"
+        );
+        let parked3 = mgr.register_queued("copy", "e:", "f:").expect("parked3");
+        let JobRetryOutcome::Exhausted(record) = mgr
+            .retry(
+                &probe,
+                &budget,
+                &parked3.id,
+                "testprov",
+                2,
+                spec("sync/copy", &params),
+            )
+            .expect("exhausted")
+        else {
+            panic!("expected Exhausted")
+        };
+        assert_eq!(record.id, parked3.id);
+        assert_eq!(
+            probe.call_count(),
+            1,
+            "Throttled/Exhausted 零引擎触达(仅首笔 revive)"
+        );
+        // error 终态行:Allow → 新 job(旧行留痕;node 走无 profile 键,桶已 1/1);
+        // Exhausted → 新登记 queued 行零触达。
+        let job = submit_ok(&mgr, 72);
+        let fail = FakeScriptDispatch::scripted(&[failed("couldn't list files: 403 Forbidden")]);
+        mgr.poll(&fail, &job.id).expect("poll to error");
+        let fresh = FakeScriptDispatch::scripted(&[serde_json::json!({ "jobid": 73 })]);
+        let JobRetryOutcome::Submitted(new_job) = mgr
+            .retry(
+                &fresh,
+                &budget,
+                &job.id,
+                "unprofiled",
+                1,
+                spec("sync/copy", &params),
+            )
+            .expect("retry error row")
+        else {
+            panic!("expected Submitted")
+        };
+        assert_ne!(new_job.id, job.id);
+        assert_eq!(new_job.engine_job_id, Some(73));
+        assert_eq!(mgr.get(&job.id).expect("old row").status, Error, "旧行留痕");
+        let JobRetryOutcome::Exhausted(parked4) = mgr
+            .retry(
+                &probe,
+                &budget,
+                &job.id,
+                "testprov",
+                2,
+                spec("sync/copy", &params),
+            )
+            .expect("error row exhausted")
+        else {
+            panic!("expected Exhausted")
+        };
+        assert_eq!((parked4.status, parked4.engine_job_id), (Queued, None));
+        // running 行拒绝 Fatal(终态零出边在状态机面已锚,此处锚编排入口)。
+        let live = submit_ok(&mgr, 74);
+        mgr.advance(&live.id, Queued, Running, None)
+            .expect("running");
+        let err = mgr
+            .retry(
+                &probe,
+                &budget,
+                &live.id,
+                "testprov",
+                1,
+                spec("sync/copy", &params),
+            )
+            .expect_err("running rejected");
+        assert_eq!(err.severity, Sev::Fatal);
+        let _ = std::fs::remove_file(&path);
     }
 }

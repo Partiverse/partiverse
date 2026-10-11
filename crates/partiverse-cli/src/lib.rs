@@ -11,4 +11,6 @@
 pub mod browse;
 pub mod connection;
 pub mod engine;
+pub mod fsops;
+pub mod jobs;
 pub mod session;

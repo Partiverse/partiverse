@@ -7,17 +7,23 @@ use partiverse_core::error::PartisyError;
 use partiverse_core::jobs::RcDispatch;
 use serde_json::json;
 
-/// `ls <remote:path>`:目标解析规则——冒号前 = remote 名(fs = `名:`),冒号后
-/// = 其内路径(可空 = 根);无冒号 = 裸本地路径(fs = 路径本身,remote = "",
-/// T09 实锚「裸路径 fs(local 后端)+ remote:"" → 200」)。
+/// 目标解析规则(本卡起为 CLI 各子命令共用单源):冒号前 = remote 名(fs =
+/// `名:`),冒号后 = 其内路径(可空 = 根);无冒号 = 裸本地路径(fs = 路径本身,
+/// remote = "",T09 实锚「裸路径 fs + remote:"" → 200」)。
+#[must_use]
+pub(crate) fn split_target(target: &str) -> (String, String) {
+    match target.split_once(':') {
+        Some((name, path)) => (format!("{name}:"), path.to_owned()),
+        None => (target.to_owned(), String::new()),
+    }
+}
+
+/// `ls <remote:path>`:目标解析规则见 [`split_target`]。
 ///
 /// # Errors
 /// rc 失败按引擎 severity 保真上浮(零吞错)。
 pub fn ls(dispatch: &impl RcDispatch, target: &str) -> Result<String, PartisyError> {
-    let (fs, remote) = match target.split_once(':') {
-        Some((name, path)) => (format!("{name}:"), path),
-        None => (target.to_owned(), ""),
-    };
+    let (fs, remote) = split_target(target);
     let reply = dispatch.call("operations/list", &json!({ "fs": fs, "remote": remote }))?;
     Ok(reply.to_string())
 }
