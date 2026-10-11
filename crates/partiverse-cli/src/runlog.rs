@@ -110,8 +110,15 @@ pub fn redact(args: &[String]) -> Vec<String> {
     let mut mask_next = false;
     for arg in args {
         if mask_next {
-            out.push(MASK.to_owned());
-            mask_next = false;
+            // 审查 F2 修正:旗标 token 不消耗打码槽(否则 `--pass --url 真值`
+            // 中真值裸奔),保持 mask_next 直至遇到非旗标真值。
+            let is_flag = arg.starts_with("--");
+            out.push(if is_flag {
+                arg.clone()
+            } else {
+                MASK.to_owned()
+            });
+            mask_next = is_flag;
             continue;
         }
         // 旗标 token(`--` 前缀)先行:仅 `--flag=value` 形态拆名,普通值里的
@@ -134,6 +141,12 @@ pub fn redact(args: &[String]) -> Vec<String> {
             out.push(arg.clone());
             continue;
         }
+        // 审查 F1 修正:URL userinfo 打码(`scheme://user:pass@host` 的 user:pass
+        // 段 → ***;WebDAV URL 内嵌凭据为常见形态,关键字兜底盖不住)。
+        if let Some(redacted_url) = redact_url_userinfo(arg) {
+            out.push(redacted_url);
+            continue;
+        }
         // 独立值兜底(卡内「含 pass/secret/token 字样的值打码」):整词自打码。
         if contains_keyword(arg) {
             out.push(MASK.to_owned());
@@ -142,6 +155,22 @@ pub fn redact(args: &[String]) -> Vec<String> {
         out.push(arg.clone());
     }
     out
+}
+
+/// URL userinfo 打码(审查 F1 修正):`scheme://user:pass@host/path` 的
+/// userinfo 段(user:pass)打码为 `***@`;无 `://`、无 userinfo(`@`)或
+/// `@` 位于路径段(最后一个 `@` 之前无 scheme 边界保护误判风险由「仅首个
+/// `://` 后的首个 `@`」口径消除)时原样返回 None 表示无需打码。
+fn redact_url_userinfo(token: &str) -> Option<String> {
+    let scheme_end = token.find("://")?;
+    let authority_start = scheme_end + 3;
+    let rest = &token[authority_start..];
+    let at = rest.find('@')?;
+    Some(format!(
+        "{}***@{}",
+        &token[..authority_start],
+        &rest[at + 1..]
+    ))
 }
 
 /// 旗标名命中脱敏规则:精确表命中,或小写化后含关键字(关键字判定大小写
@@ -359,6 +388,32 @@ mod tests {
         let content = fs::read_to_string(&path2).expect("log readable");
         assert!(content.starts_with("tiny"), "未超限零轮转: {content:?}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 审查对抗单测(F1/F2 复现):URL userinfo 与 mask_next 旗标劫持。
+    #[test]
+    fn adversarial_url_userinfo_and_mask_next_hijack() {
+        // F1:--url 携带 https://user:pass@host 形态(WebDAV 常见),值不含
+        // pass/secret/token 关键字 → userinfo 段明文落日志=逃逸(期望打码)。
+        let url = redact(&args(&[
+            "create-webdav",
+            "demo",
+            "--url",
+            "https://alice:hunter2@example.com/dav",
+        ]));
+        eprintln!("F1 actual: {url:?}");
+        let joined = url.join(" ");
+        assert!(
+            !joined.contains("hunter2"),
+            "URL userinfo 明文逃逸: {joined}"
+        );
+        // F2:mask_next 槽位被旗标劫持(--pass --url hunter2)。
+        let hijack = redact(&args(&["--pass", "--url", "hunter2"]));
+        eprintln!("F2 actual: {hijack:?}");
+        assert!(
+            !hijack.contains(&"hunter2".to_string()),
+            "mask_next 槽位劫持逃逸: {hijack:?}"
+        );
     }
 
     /// 卡内 ②:error_chain 全文逐行入日志(每链一行 ERROR);stderr 打印归 main。
