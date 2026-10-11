@@ -6,8 +6,8 @@ import { commands, type FieldDesc } from "@/bindings";
 import { t } from "@/i18n";
 import {
   aggregateProbe, BAIDU_SANDBOX_NOTICE_KEY, branchGroupKey, branchGuidanceKeys, buildDefaultValues,
-  buildZodSchema, createChannel, GDRIVE_DRIVEFILE_NOTICE_KEY, PAN123_FIELDS, redactValues,
-  routeBranch, SECRET_MASK, type ProbeInput,
+  buildZodSchema, collectProtocolParameters, createChannel, GDRIVE_DRIVEFILE_NOTICE_KEY, isLocalProvider,
+  PAN123_FIELDS, redactValues, routeBranch, SECRET_MASK, type ProbeInput,
 } from "./model";
 
 function desc(overrides: Partial<FieldDesc>): FieldDesc {
@@ -63,10 +63,44 @@ describe("secret 脱敏(R2 红线 UI 层)", () => {
   });
 });
 
-describe("创建通道守卫", () => {
-  it("仅 pan123 有已交付 IPC 通道,其余显式 null(上浮通道未交付)", () => {
+describe("创建通道守卫(M1-WP05-T09 接线)", () => {
+  it("pan123=connection_create_123、协议类=connection_create_protocol;oauth/baidu 显式 null", () => {
     expect(createChannel("pan123")).toBe("connection_create_123");
-    for (const branch of ["protocol", "oauth", "baidu"] as const) expect(createChannel(branch)).toBeNull();
+    expect(createChannel("protocol")).toBe("connection_create_protocol");
+    for (const branch of ["oauth", "baidu"] as const) expect(createChannel(branch)).toBeNull();
+  });
+
+  it("local 后端判定:大小写不敏感命中 local,其余不误伤(webdav/smb)", () => {
+    expect(isLocalProvider("local")).toBe(true);
+    expect(isLocalProvider("Local")).toBe(true);
+    expect(isLocalProvider("webdav")).toBe(false);
+    expect(isLocalProvider("smb")).toBe(false);
+  });
+
+  it("协议类表单值 → parameters JSON 文本:name 除外、空串/false 落缺省、trim、password 原值直达 IPC", () => {
+    const fields: FieldDesc[] = [
+      { name: "name", field_type: "string", required: true, is_password: false, advanced: false, exclusive: false, default: null },
+      { name: "url", field_type: "string", required: true, is_password: false, advanced: false, exclusive: false, default: null },
+      { name: "vendor", field_type: "string", required: false, is_password: false, advanced: false, exclusive: false, default: null },
+      { name: "pass", field_type: "string", required: false, is_password: true, advanced: false, exclusive: false, default: null },
+      { name: "ro", field_type: "bool", required: false, is_password: false, advanced: false, exclusive: false, default: null },
+    ];
+    const json = collectProtocolParameters(fields, {
+      name: "mywebdav",
+      url: "  https://dav.example.invalid/  ",
+      vendor: "",
+      pass: "s3cr3t-pass-value",
+      ro: true,
+    });
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    expect(parsed).toEqual({
+      url: "https://dav.example.invalid/",
+      pass: "s3cr3t-pass-value",
+      ro: true,
+    });
+    // name 不入 parameters(remote 名走 config/create 顶层参数);空串不落键。
+    expect("name" in parsed).toBe(false);
+    expect("vendor" in parsed).toBe(false);
   });
 
   it("123 专用表单:字段序固定、全必填、密码字段=app_password", () => {

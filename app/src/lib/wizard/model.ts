@@ -93,13 +93,42 @@ export function redactValues(fields: FieldDesc[], values: Record<string, unknown
   return out;
 }
 
-/** 创建通道守卫:仅 pan123 分支有已交付 IPC 通道(T01 connection_create_123);其余返回
- *  null,调用方必须显式上浮「通道未交付」错误态(禁静默/禁伪造成功)。
- *  baidu 分支保持 null(M1-WP05-T08 Owner 裁定 2026-10-10):壳命令 baidu_exchange_code
- *  已交付(真实换码),但引擎钉定 rclone v1.75.1 无 baidu backend,接线后换码必然后续失败
- *  且徒耗一次性授权 code——向导接线待 backends-go 百度后端落地(另立卡)。 */
-export function createChannel(branch: WizardBranch): "connection_create_123" | null {
-  return branch === "pan123" ? "connection_create_123" : null;
+/** 创建通道守卫(M1-WP05-T09 更新):pan123=connection_create_123、协议类=
+ *  connection_create_protocol(T09 新建壳命令:config/create 透传+config/get
+ *  回读断言);oauth/baidu 维持 null(T08 Owner 裁定 2026-10-10:baidu 引擎钉定
+ *  1.75.1 无后端,接线必徒耗一次性授权 code;oauth 类换码流属另卡),调用方
+ *  必须显式上浮「通道未交付」错误态(禁静默/禁伪造成功)。 */
+export type CreateChannelCommand = "connection_create_123" | "connection_create_protocol";
+export function createChannel(branch: WizardBranch): CreateChannelCommand | null {
+  if (branch === "pan123") return "connection_create_123";
+  if (branch === "protocol") return "connection_create_protocol";
+  return null;
+}
+
+/** local 后端判定(DoD④ local 分支):2026-10-11 实机锚定 rclone 1.75.1
+ *  `config/providers` local 条目仅含 advanced 可选项(零必填零密码),免
+ *  config 直浏览家目录;判定独立成纯函数供测试钉住。 */
+export function isLocalProvider(providerName: string): boolean {
+  return providerName.toLowerCase() === "local";
+}
+
+/** 协议类表单值 → config/create parameters(JSON 文本,T09 DoD① specta 口径):
+ *  `name` 除外(rclone remote 名走 config/create 顶层 name 参数,非 options 项);
+ *  空串/false 落缺省(不覆盖 backend 默认,实测空串可覆盖枚举候选语义);
+ *  bool true / 非空串(含 password 字段)原值入参——secret 仅经 IPC 通道直达
+ *  壳 connection_create_protocol,零日志零预览(预览面仍走 redactValues 掩码)。 */
+export function collectProtocolParameters(fields: FieldDesc[], values: Record<string, unknown>): string {
+  const out: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (field.name === "name") continue;
+    const raw = values[field.name];
+    if (field.field_type === "bool") {
+      if (raw === true) out[field.name] = true;
+    } else if (typeof raw === "string" && raw.trim() !== "") {
+      out[field.name] = raw.trim();
+    }
+  }
+  return JSON.stringify(out);
 }
 
 function field(name: string, required: boolean, isPassword: boolean): FieldDesc {

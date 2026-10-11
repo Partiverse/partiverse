@@ -80,6 +80,15 @@ pub struct ShellDispatch {
     client: RcClient,
 }
 
+impl ShellDispatch {
+    /// 测试构造面(仅测试构建):真引擎句柄的 rc 客户端直入适配器,令壳命令
+    /// 同步体的真引擎测试与生产路径同消费面(零生产影响)。
+    #[cfg(test)]
+    pub(crate) fn for_tests(client: RcClient) -> Self {
+        ShellDispatch { client }
+    }
+}
+
 impl RcDispatch for ShellDispatch {
     fn call(&self, method: &str, params: &Value) -> Result<Value, PartisyError> {
         let method = RcMethod::try_from_name(method)

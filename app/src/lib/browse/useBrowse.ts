@@ -1,7 +1,10 @@
 // 浏览数据接线(DoD①④):消费 T01 bindings.operationsList,目录逐层列举;
 // 缓存壳优先(已列目录秒开)、未载目录骨架占位(慢源渐进)。命令信封错误与
 // 传输层异常一律上浮为 DirState.error 并记入健康徽标「最近错误」,禁吞错。
-// 当前节点=本地盘(rclone local 后端;远端 Node 枚举命令未交付,后续 WP 接入)。
+// 当前节点=本地盘(rclone local 后端,fs=裸路径;远端 Node 枚举命令未交付,
+// 后续 WP 接入)。M1-WP05-T09:operations_list 两键齐传(remote 空串合法,
+// 仅 fs 单键 = 引擎 400,实测锚定);默认根=壳解析的用户家目录(DoD③,
+// 修复 F3 浏览默认根=/ 与新建文件夹 permission denied)。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { commands, type CmdError } from "@/bindings";
 import { recordEngineError } from "@/lib/healthStore";
@@ -49,11 +52,40 @@ export interface BrowseController {
 }
 
 export function useBrowse(node: BrowseNode): BrowseController {
-  const [rootPath, setRootPath] = useState("/");
+  // 默认根(DoD③):null = 家目录解析中(骨架态);解析失败 = homeError 上浮
+  // (错误态,禁回退 "/"——权限缺陷不许藏成 UX 问题)。
+  const [rootPath, setRootPath] = useState<string | null>(null);
+  const [homeError, setHomeError] = useState<string | null>(null);
   const [dirs, setDirs] = useState<Record<string, DirState>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [sort, setSort] = useState<SortSpec>(DEFAULT_SORT);
   const [chips, setChips] = useState<string[]>([]);
+
+  // 家目录解析(壳 user_home_dir,HOME/USERPROFILE 零硬编码):仅挂载时一次。
+  useEffect(() => {
+    let cancelled = false;
+    commands
+      .userHomeDir()
+      .then((result) => {
+        if (cancelled) return;
+        if (result.status === "error") {
+          const message = envelopeError(result.error);
+          recordEngineError(message);
+          setHomeError(message);
+        } else {
+          setRootPath(result.data);
+        }
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        const message = errorText(err);
+        recordEngineError(message);
+        setHomeError(message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const dirsRef = useRef(dirs);
   useEffect(() => {
@@ -71,7 +103,8 @@ export function useBrowse(node: BrowseNode): BrowseController {
           if (ensured.status === "error") throw new Error(envelopeError(ensured.error));
           engineEnsuredRef.current = true;
         }
-        const result = await commands.operationsList(fsForPath(path));
+        // 两键齐传(remote 空串合法):仅 fs 单键 = 引擎 400(T09 实测锚定)。
+        const result = await commands.operationsList(fsForPath(path), "");
         if (result.status === "error") throw new Error(envelopeError(result.error));
         const parsed = parseDirListing(result.data, path, node.label);
         if (!parsed.ok) throw new Error(parsed.error);
@@ -94,9 +127,10 @@ export function useBrowse(node: BrowseNode): BrowseController {
     [node.label],
   );
 
-  // 根路径变化:缓存命中零触达;未列过才发起(缓存壳,不空白回退)。
+  // 根路径变化:缓存命中零触达;未列过才发起(缓存壳,不空白回退);
+  // 家目录未解析(null)前零触达。
   useEffect(() => {
-    if (dirsRef.current[rootPath] === undefined) void loadDir(rootPath);
+    if (rootPath !== null && dirsRef.current[rootPath] === undefined) void loadDir(rootPath);
   }, [rootPath, loadDir]);
 
   const onExpandedChange = useCallback(
@@ -123,23 +157,26 @@ export function useBrowse(node: BrowseNode): BrowseController {
   }, []);
 
   const retry = useCallback(() => {
-    void loadDir(rootPath);
+    if (rootPath !== null) void loadDir(rootPath);
   }, [loadDir, rootPath]);
 
+  // 家目录未解析期间以空根占位构建(空树零行,phase=骨架面接管,不渲染)。
+  const resolvedRoot = rootPath ?? "";
   const data = useMemo(
-    () => buildTreeData(rootPath, dirs, expanded, sort, chips),
-    [rootPath, dirs, expanded, sort, chips],
+    () => buildTreeData(resolvedRoot, dirs, expanded, sort, chips),
+    [resolvedRoot, dirs, expanded, sort, chips],
   );
   const rootEntries = useMemo(() => {
+    if (rootPath === null) return [];
     const state = dirs[rootPath];
     if (state === undefined || state.status !== "ready") return [];
     return state.entries.filter((e) => matchesChips(e.name, chips)).sort((a, b) => compareEntries(a, b, sort));
   }, [dirs, rootPath, chips, sort]);
 
   return {
-    rootPath,
-    phase: deriveBrowsePhase(dirs[rootPath]),
-    rootError: dirs[rootPath]?.error ?? null,
+    rootPath: resolvedRoot,
+    phase: homeError !== null ? "error" : deriveBrowsePhase(rootPath === null ? undefined : dirs[rootPath]),
+    rootError: homeError ?? (rootPath !== null ? dirs[rootPath]?.error ?? null : null),
     data,
     rootEntries,
     sort,

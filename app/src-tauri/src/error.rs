@@ -41,12 +41,8 @@ impl From<partiverse_core::error::Severity> for Severity {
 pub enum ErrorKind {
     /// 本地 IO(配置、缓存等读写失败)。
     Io,
-    /// 配置缺失或非法。
-    ///
-    /// IPC 线格式契约类别:生产代码构造点随首个配置读取命令落地。非测试构建下以
-    /// `expect` 声明「尚未构造」——一旦出现构造点会因期望未失效报警,届时删除本属性
-    /// (优于 allow 永久压制);测试 target 构造它以钉住线格式值,故属性限定 not(test)。
-    #[cfg_attr(not(test), expect(dead_code))]
+    /// 配置缺失或非法(首个生产构造点 = `user_home_dir`,M1-WP05-T09 家目录
+    /// 解析;HOME/USERPROFILE 缺失 = 环境配置错误,Fatal 上浮)。
     Config,
     /// 未归类内部错误(兜底;分类困难时不得用它掩盖可判定类别)。
     Internal,
